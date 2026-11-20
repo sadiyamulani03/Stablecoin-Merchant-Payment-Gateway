@@ -1,0 +1,52 @@
+services:
+  - type: web
+    name: stablecoin-gateway-api
+    runtime: node
+    plan: free
+    rootDir: .
+    buildCommand: npm ci && npm run build --workspace backend
+    startCommand: node backend/dist/src/index.js
+    healthCheckPath: /health
+    autoDeploy: true
+    # PORT is injected by Render. Do not set it here.
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: 22.x
+      - key: HOST
+        value: 0.0.0.0
+      - key: LOG_LEVEL
+        value: info
+      - key: CORS_ORIGIN
+        sync: false
+      - key: MONGODB_URI
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: WEBHOOK_SECRET
+        generateValue: true
+      - key: DEFAULT_CHAIN
+        value: adi-testnet
+      - key: FRONTEND_URL
+        sync: false
+      - key: ADI_TESTNET_RPC_URL
+        sync: false
+      - key: POLYGON_AMOY_RPC_URL
+        sync: false
+      - key: ADI_TESTNET_TOKEN_ADDRESS
+        value: 0x06289d9c452369abcb9bc1b5d6adf80982c5679c
+      - key: ADI_TESTNET_PAYMENT_ROUTER_ADDRESS
+        value: 0x18108f9e50159200782294c54186a4c67cf2af54
+      - key: ADI_TESTNET_SUBSCRIPTION_MANAGER_ADDRESS
+        value: 0xe89c39ab06f0290caf555259ed8ae65c40e7acee
+      - key: POLYGON_AMOY_TOKEN_ADDRESS
+        value: 0x06289D9c452369abcb9bc1b5D6Adf80982C5679C
+      - key: POLYGON_AMOY_PAYMENT_ROUTER_ADDRESS
+        value: 0x18108f9E50159200782294c54186a4c67cF2Af54
+      - key: POLYGON_AMOY_SUBSCRIPTION_MANAGER_ADDRESS
+        value: 0xE89c39aB06F0290CAf555259ed8aE65C40E7AcEE
+      - key: ADI_TESTNET_PRIVATE_KEY
+        sync: false
+      - key: POLYGON_AMOY_PRIVATE_KEY
+        sync: false

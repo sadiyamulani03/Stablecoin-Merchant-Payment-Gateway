@@ -1,0 +1,36 @@
+node_modules
+.next
+dist
+coverage
+
+# Secrets: never publish
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Foundry build output and vendored dependencies (restored with `forge install`)
+contracts/lib/
+contracts/out/
+contracts/cache/
+
+# Deployment receipts under contracts/broadcast/ ARE tracked; only lock files are ignored
+*.recovery.lock
+
+# Tooling caches
+*.tsbuildinfo
+.turbo/
+
+# Local one-off debug and probe scripts: kept in the working tree, not published
+/check_polygon.mjs
+/test_avvio.mjs
+backend/debug_index.mts
+backend/start-server*.mjs
+backend/test-server.mjs
+backend/test_fastify*
+backend/test_full_integration.mts
+backend/test_minimal.mjs
+backend/test_simple.js
+frontend/verify_frontend.mjs
+
+.DS_Store
