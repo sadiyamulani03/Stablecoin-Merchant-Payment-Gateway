@@ -1,3 +1,291 @@
 "use client";
-import {useState} from "react";import Shell from "../../../components/Shell";import {API_URL,NETWORKS,type ChainKey} from "../../../lib/config";import {authHeaders} from "../../../lib/auth";
-export default function NewPayment(){const [amount,setAmount]=useState("25.00");const [description,setDescription]=useState("");const [chain,setChain]=useState<ChainKey>("adi-testnet");const [result,setResult]=useState<any>(null);const [error,setError]=useState("");const [busy,setBusy]=useState(false);async function create(e:React.FormEvent){e.preventDefault();setBusy(true);setError("");try{const merchantId=localStorage.getItem("merchant_id");if(!merchantId)throw new Error("Please sign in first");const r=await fetch(`${API_URL}/api/payments/create`,{method:"POST",headers:{"Content-Type":"application/json",...authHeaders()},body:JSON.stringify({merchantId,amount,description,chain})});const d=await r.json();if(!r.ok)throw new Error(d.error||"Could not create payment");setResult(d);}catch(e){setError(e instanceof Error?e.message:"Failed");}finally{setBusy(false)}}return <Shell><div className="pagehead"><div><div className="eyebrow">Collect a payment</div><h1>New payment request</h1></div></div><div className="card"><form className="form" onSubmit={create}><div className="field"><label>Amount (AED display; test token units)</label><input required inputMode="decimal" pattern="[0-9]+(\.[0-9]{1,2})?" value={amount} onChange={e=>setAmount(e.target.value)}/></div><div className="field"><label>Description</label><input value={description} maxLength={200} onChange={e=>setDescription(e.target.value)} placeholder="Invoice or order reference"/></div><div className="field"><label>Testnet</label><select value={chain} onChange={e=>setChain(e.target.value as ChainKey)}>{Object.entries(NETWORKS).map(([k,n])=><option key={k} value={k}>{n.name} · {n.chainId}</option>)}</select></div>{error&&<div className="error">{error}</div>}<button className="btn" disabled={busy}>{busy?"Creating on-chain intent…":"Create payment & QR"}</button></form></div>{result&&<div className="card" style={{marginTop:20,display:"grid",justifyItems:"start",gap:12}}><span className="pill">Payment intent created</span><h2>AED {amount}</h2><img className="qr" src={result.qrCode} alt="Payment QR code"/><p className="muted">Scan to open the customer payment page. Network: {result.chain}</p><code style={{wordBreak:"break-all"}}>{result.paymentId}</code><a className="btn" href={`/pay/${result.paymentId}?chain=${result.chain}`}>Open customer payment page</a><a className="muted" href={NETWORKS[chain].explorer+"tx/"+result.txHash} target="_blank" rel="noreferrer">View intent transaction ↗</a></div>}</Shell>}
+
+import { useEffect, useState } from "react";
+import Image from "next/image";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import Shell from "../../../components/Shell";
+import { Alert, Badge, Card, Field, KeyValue, StepList } from "../../../components/ui";
+import CopyButton from "../../../components/CopyButton";
+import { useSession } from "../../../components/SessionProvider";
+import { apiFetch, ApiError } from "../../../lib/api";
+import { NETWORKS, TOKEN_SYMBOL, type ChainKey } from "../../../lib/config";
+import { explorerTxUrl, formatAmount, formatDateTime, paymentStatusMeta } from "../../../lib/format";
+import { recordPayment } from "../../../lib/ledger";
+import type { CreatePaymentResponse, PaymentStatus, PaymentStatusResponse } from "../../../lib/types";
+import { amountSchema, descriptionSchema, zodFieldErrors, type FieldErrors } from "../../../lib/validation";
+
+export default function NewPayment() {
+  const router = useRouter();
+  const { session, isResolved } = useSession();
+  const [amount, setAmount] = useState("");
+  const [description, setDescription] = useState("");
+  const [chain, setChain] = useState<ChainKey>("adi-testnet");
+  const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
+  const [formError, setFormError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<CreatePaymentResponse | null>(null);
+  const [status, setStatus] = useState<PaymentStatus | null>(null);
+
+  const merchantId = session?.merchantId ?? null;
+
+  useEffect(() => {
+    if (isResolved && !merchantId) router.replace("/login");
+  }, [isResolved, merchantId, router]);
+
+  useEffect(() => {
+    if (!result) return;
+    const created = result;
+    let active = true;
+
+    async function refresh() {
+      try {
+        const response = await apiFetch<PaymentStatusResponse>(
+          `/api/payments/${created.paymentId}?chain=${created.chain}`
+        );
+        if (active) setStatus(response.status);
+      } catch {
+        /* keep the last known status */
+      }
+    }
+
+    void refresh();
+    const timer = window.setInterval(refresh, 8000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [result]);
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    setFieldErrors({});
+    setFormError("");
+
+    const parsedAmount = amountSchema.safeParse(amount);
+    const parsedDescription = descriptionSchema.safeParse(description);
+    if (!parsedAmount.success || !parsedDescription.success) {
+      const errors: FieldErrors = {};
+      if (!parsedAmount.success) Object.assign(errors, zodFieldErrors(parsedAmount.error));
+      if (!parsedDescription.success) Object.assign(errors, zodFieldErrors(parsedDescription.error));
+      setFieldErrors(errors);
+      return;
+    }
+    if (!merchantId) {
+      setFormError("Please sign in before creating a payment request.");
+      return;
+    }
+
+    setBusy(true);
+    try {
+      const response = await apiFetch<CreatePaymentResponse>("/api/payments/create", {
+        method: "POST",
+        auth: true,
+        body: {
+          merchantId,
+          amount: parsedAmount.data,
+          description: parsedDescription.data,
+          chain
+        }
+      });
+
+      recordPayment(merchantId, {
+        paymentId: response.paymentId,
+        chain: response.chain,
+        amount: parsedAmount.data,
+        description: parsedDescription.data,
+        createdAt: new Date().toISOString(),
+        expiresAt: response.expiresAt,
+        txHash: response.txHash
+      });
+
+      setResult(response);
+      setStatus("pending");
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setFormError("Your session expired. Please sign in again.");
+      } else {
+        setFormError(error instanceof Error ? error.message : "Could not create the payment request.");
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const statusMeta = paymentStatusMeta(status);
+  const shareUrl = result?.qrPayload?.url ?? "";
+  const txUrl = result ? explorerTxUrl(result.chain, result.txHash) : null;
+
+  if (!isResolved || !merchantId) {
+    return (
+      <Shell>
+        <div className="pagehead">
+          <div>
+            <div className="eyebrow">Collect a payment</div>
+            <h1>New payment request</h1>
+          </div>
+        </div>
+        <Alert tone="info">Checking your session…</Alert>
+      </Shell>
+    );
+  }
+
+  return (
+    <Shell>
+      <div className="pagehead">
+        <div>
+          <div className="eyebrow">Collect a payment</div>
+          <h1>New payment request</h1>
+          <p>
+            Creates an on-chain intent and a QR code your customer can scan from any device. Amounts are
+            denominated in {TOKEN_SYMBOL} test units displayed as AED.
+          </p>
+        </div>
+        <Link className="btn secondary" href="/history">
+          Payment history
+        </Link>
+      </div>
+
+      <div className="split">
+        <Card pad-lg>
+          <form className="form" onSubmit={submit} noValidate>
+            <Field
+              label="Amount (AED)"
+              htmlFor="amount"
+              hint="Up to two decimal places. Settled in mock mDDSC test tokens."
+              error={fieldErrors.amount}
+            >
+              <input
+                id="amount"
+                name="amount"
+                required
+                inputMode="decimal"
+                placeholder="125.50"
+                value={amount}
+                aria-invalid={fieldErrors.amount ? "true" : undefined}
+                onChange={(event) => setAmount(event.target.value)}
+              />
+            </Field>
+
+            <Field
+              label="Description"
+              htmlFor="description"
+              hint="Optional. Appears in your payment history and on the checkout screen."
+              error={fieldErrors.description}
+            >
+              <textarea
+                id="description"
+                name="description"
+                rows={3}
+                maxLength={200}
+                placeholder="Order 4821 · Table 7"
+                value={description}
+                aria-invalid={fieldErrors.description ? "true" : undefined}
+                onChange={(event) => setDescription(event.target.value)}
+              />
+            </Field>
+
+            <Field label="Network" htmlFor="chain" hint="The customer must pay on the same network.">
+              <select
+                id="chain"
+                name="chain"
+                value={chain}
+                onChange={(event) => setChain(event.target.value as ChainKey)}
+              >
+                {(Object.keys(NETWORKS) as ChainKey[]).map((key) => (
+                  <option key={key} value={key}>
+                    {NETWORKS[key].name} · chain {NETWORKS[key].chainId}
+                  </option>
+                ))}
+              </select>
+            </Field>
+
+            {formError ? <Alert tone="danger">{formError}</Alert> : null}
+
+            <button className="btn" type="submit" disabled={busy}>
+              {busy ? "Creating on-chain intent…" : "Create request and QR code"}
+            </button>
+          </form>
+        </Card>
+
+        <div className="stack">
+          {result ? (
+            <Card>
+              <div className="cluster" style={{ justifyContent: "space-between", marginBottom: 14 }}>
+                <h2 style={{ fontSize: 17 }}>Payment request ready</h2>
+                <Badge tone={statusMeta.tone}>{statusMeta.label}</Badge>
+              </div>
+
+              {result.qrCode ? (
+                <Image
+                  className="qr"
+                  src={result.qrCode}
+                  alt={`QR code for payment request ${result.paymentId}`}
+                  width={240}
+                  height={240}
+                  unoptimized
+                />
+              ) : null}
+
+              <div className="stack" style={{ marginTop: 16 }}>
+                <KeyValue
+                  items={[
+                    { label: "Amount", value: `AED ${formatAmount(result.qrPayload?.amount ?? amount)}` },
+                    { label: "Network", value: NETWORKS[result.chain].name },
+                    { label: "Expires", value: formatDateTime(result.expiresAt) },
+                    {
+                      label: "Payment ID",
+                      value: (
+                        <span className="cluster" style={{ justifyContent: "flex-end" }}>
+                          <span className="mono">{result.paymentId.slice(0, 10)}…</span>
+                          <CopyButton value={result.paymentId} />
+                        </span>
+                      )
+                    }
+                  ]}
+                />
+              </div>
+
+              <div className="btn-row" style={{ marginTop: 16 }}>
+                <CopyButton value={shareUrl} label="Copy payment link" className="btn secondary sm" />
+                <Link
+                  className="btn sm"
+                  href={`/pay/${result.paymentId}?chain=${result.chain}`}
+                  target="_blank"
+                >
+                  Open checkout
+                </Link>
+              </div>
+
+              {txUrl ? (
+                <p className="small muted" style={{ marginTop: 14 }}>
+                  Intent transaction:{" "}
+                  <a className="hash" href={txUrl} target="_blank" rel="noreferrer">
+                    {result.txHash.slice(0, 14)}…
+                  </a>
+                </p>
+              ) : null}
+            </Card>
+          ) : (
+            <Card>
+              <h2 style={{ fontSize: 17, marginBottom: 8 }}>How this works</h2>
+              <StepList
+                steps={[
+                  { label: "Create the request — an on-chain intent is published by the gateway.", state: "todo" },
+                  { label: "Share the QR code or payment link with your customer.", state: "todo" },
+                  { label: "The customer approves and pays from their own wallet.", state: "todo" },
+                  { label: "The status above updates automatically from the chain.", state: "todo" }
+                ]}
+              />
+              <div style={{ marginTop: 14 }}>
+                <Alert tone="warning" title="Test token only">
+                  Requests settle in mDDSC, a mock stablecoin. No real AED or DDSC value moves.
+                </Alert>
+              </div>
+            </Card>
+          )}
+        </div>
+      </div>
+    </Shell>
+  );
+}

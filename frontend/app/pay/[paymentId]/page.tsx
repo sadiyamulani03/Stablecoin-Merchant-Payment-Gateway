@@ -1,5 +1,445 @@
 "use client";
-import {useEffect,useState} from "react";import {useParams} from "next/navigation";import {BrowserProvider,Contract,parseUnits} from "ethers";import Shell from "../../../components/Shell";import {API_URL,NETWORKS,DEPLOYMENTS,getChain,ROUTER_ABI,TOKEN_ABI,type ChainKey} from "../../../lib/config";
-declare global{interface Window{ethereum?:any}}
-export default function PayPage(){const params=useParams<{paymentId:string}>();const [chain,setChain]=useState<ChainKey>("adi-testnet");const [payment,setPayment]=useState<any>(null);const [account,setAccount]=useState("");const [busy,setBusy]=useState(false);const [message,setMessage]=useState("");const [error,setError]=useState("");useEffect(()=>{const selected=getChain(new URLSearchParams(window.location.search).get("chain"));setChain(selected);fetch(`${API_URL}/api/payments/${params.paymentId}?chain=${selected}`).then(r=>r.json()).then(setPayment).catch(()=>setError("Could not load payment"));},[params.paymentId]);async function connect(){if(!window.ethereum)throw new Error("Install MetaMask or another EVM wallet");const provider=new BrowserProvider(window.ethereum);const accounts=await provider.send("eth_requestAccounts",[]);setAccount(accounts[0]);return provider;}async function pay(){setBusy(true);setError("");setMessage("");try{const provider=await connect();const network=NETWORKS[chain];const current=await provider.getNetwork();if(Number(current.chainId)!==network.chainId){try{await provider.send("wallet_switchEthereumChain",[{chainId:network.chainHex}]);}catch(e:any){if(e.code===4902)await provider.send("wallet_addEthereumChain",[{chainId:network.chainHex,chainName:network.name,nativeCurrency:{name:network.currency,symbol:network.currency,decimals:18},rpcUrls:[network.rpc],blockExplorerUrls:[network.explorer]}]);else throw e;}}
-const signer=await provider.getSigner();const dep=DEPLOYMENTS[chain];if(!dep.token||!dep.router)throw new Error("This network's token/router address is not configured (NEXT_PUBLIC_* environment variables on Vercel)");const token=new Contract(dep.token,TOKEN_ABI,signer);const router=new Contract(dep.router,ROUTER_ABI,signer);const decimals=Number(await token.decimals());const value=parseUnits(String(payment.amount),decimals);setMessage("Please confirm token approval in your wallet…");const approve=await token.approve(dep.router,value);await approve.wait();setMessage("Approval confirmed. Confirm the payment transaction…");const tx=await router.pay(params.paymentId,dep.token);await tx.wait();setMessage("Payment confirmed on-chain. Refreshing receipt…");const r=await fetch(`${API_URL}/api/payments/${params.paymentId}?chain=${chain}`);setPayment(await r.json());setMessage("Payment successfully settled on-chain.");}catch(e){setError(e instanceof Error?e.message:"Payment failed");}finally{setBusy(false)}}return <Shell><div className="center"><div className="card" style={{width:"100%",maxWidth:520}}><div className="eyebrow">Customer checkout · {NETWORKS[chain].name}</div><h1>Complete your payment</h1>{payment?<><div className="metric">AED {payment.amount}</div><p className="muted">Payment reference</p><code style={{wordBreak:"break-all"}}>{params.paymentId}</code><p><span className="pill">Status: {payment.status}</span></p>{payment.status==="pending"?<><p className="muted">Connect your wallet, approve the test token, and confirm payment.</p><button className="btn" disabled={busy} onClick={pay}>{busy?"Processing…":account?"Pay with connected wallet":"Connect wallet & pay"}</button>{account&&<small className="muted">Connected: {account.slice(0,6)}…{account.slice(-4)}</small>}</>:<p>Thank you. The chain reports this payment as {payment.status}.</p>}</>:<p className="muted">Loading payment…</p>}{message&&<div className="notice" style={{marginTop:12}}>{message}</div>}{error&&<div className="error" style={{marginTop:12}}>{error}</div>}<div className="notice" style={{marginTop:18}}>This is a testnet transaction using mock mDDSC tokens. It has no real AED value.</div></div></div></Shell>}
+
+import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
+import { useParams, useSearchParams } from "next/navigation";
+import type { BrowserProvider } from "ethers";
+import Shell from "../../../components/Shell";
+import { Alert, Badge, Card, KeyValue, StepList } from "../../../components/ui";
+import CopyButton from "../../../components/CopyButton";
+import { apiFetch } from "../../../lib/api";
+import { DEPLOYMENTS, NETWORKS, TOKEN_SYMBOL, getChain } from "../../../lib/config";
+import {
+  explorerTxUrl,
+  formatAmount,
+  formatDateTime,
+  formatRelative,
+  paymentStatusMeta,
+  shortenAddress
+} from "../../../lib/format";
+import type { PaymentStatusResponse } from "../../../lib/types";
+import {
+  approveToken,
+  connectAccount,
+  currentChainId,
+  describeWalletError,
+  ensureChain,
+  payPayment,
+  readAllowance,
+  readContractPayment,
+  readTokenBalance
+} from "../../../lib/wallet";
+
+type Stage =
+  | "idle"
+  | "connecting"
+  | "switching"
+  | "approving"
+  | "approving-confirm"
+  | "paying"
+  | "paying-confirm"
+  | "success"
+  | "error";
+
+const STAGE_LABELS: Record<Stage, string> = {
+  idle: "Connect your wallet",
+  connecting: "Waiting for wallet approval",
+  switching: "Switching network",
+  approving: "Approve mDDSC spending",
+  "approving-confirm": "Confirm the approval in your wallet",
+  paying: "Submit the payment transaction",
+  "paying-confirm": "Confirm the payment in your wallet",
+  success: "Payment settled",
+  error: "Something went wrong"
+};
+
+export default function PayPage() {
+  const params = useParams<{ paymentId: string }>();
+  const searchParams = useSearchParams();
+  const chain = getChain(searchParams.get("chain"));
+
+  const [payment, setPayment] = useState<PaymentStatusResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+
+  const [provider, setProvider] = useState<BrowserProvider | null>(null);
+  const [account, setAccount] = useState("");
+  const [walletChainId, setWalletChainId] = useState<number | null>(null);
+  const [balance, setBalance] = useState<string | null>(null);
+  const [allowance, setAllowance] = useState<string | null>(null);
+  const [intentExpiresAt, setIntentExpiresAt] = useState<string | null>(null);
+
+  const [stage, setStage] = useState<Stage>("idle");
+  const [error, setError] = useState("");
+  const [approveTx, setApproveTx] = useState("");
+  const [payTx, setPayTx] = useState("");
+
+  const deployment = DEPLOYMENTS[chain];
+  const statusMeta = paymentStatusMeta(payment?.status);
+
+  const loadPayment = useCallback(async () => {
+    try {
+      const response = await apiFetch<PaymentStatusResponse>(
+        `/api/payments/${params.paymentId}?chain=${chain}`
+      );
+      setPayment(response);
+      setLoadError("");
+    } catch (requestError) {
+      setLoadError(
+        requestError instanceof Error ? requestError.message : "Could not load this payment request."
+      );
+    } finally {
+      setLoading(false);
+    }
+  }, [params.paymentId, chain]);
+
+  useEffect(() => {
+    let active = true;
+
+    async function load() {
+      try {
+        const response = await apiFetch<PaymentStatusResponse>(
+          `/api/payments/${params.paymentId}?chain=${chain}`
+        );
+        if (active) {
+          setPayment(response);
+          setLoadError("");
+        }
+      } catch (requestError) {
+        if (active) {
+          setLoadError(
+            requestError instanceof Error
+              ? requestError.message
+              : "Could not load this payment request."
+          );
+        }
+      } finally {
+        if (active) setLoading(false);
+      }
+    }
+
+    void load();
+    return () => {
+      active = false;
+    };
+  }, [params.paymentId, chain]);
+
+  useEffect(() => {
+    if (!payment || payment.status !== "pending") return;
+    const timer = window.setInterval(() => {
+      void loadPayment();
+    }, 10000);
+    return () => window.clearInterval(timer);
+  }, [payment, loadPayment]);
+
+  const refreshWalletState = useCallback(async (activeProvider: BrowserProvider, activeAccount: string) => {
+    const id = await currentChainId(activeProvider);
+    setWalletChainId(id);
+    if (id !== NETWORKS[chain].chainId) return;
+    if (!deployment.token) return;
+    const tokenBalance = await readTokenBalance(activeProvider, deployment.token, activeAccount);
+    setBalance(tokenBalance);
+    if (deployment.router) {
+      const tokenAllowance = await readAllowance(
+        activeProvider,
+        deployment.token,
+        activeAccount,
+        deployment.router
+      );
+      setAllowance(tokenAllowance);
+    }
+    try {
+      const onchain = await readContractPayment(activeProvider, deployment.router, params.paymentId);
+      setIntentExpiresAt(new Date(Number(onchain.createdAt) * 1000 + 3600 * 1000).toISOString());
+    } catch {
+      setIntentExpiresAt(null);
+    }
+  }, [chain, deployment.router, deployment.token, params.paymentId]);
+
+  async function connect() {
+    setStage("connecting");
+    setError("");
+    try {
+      const { provider: connectedProvider, account: connectedAccount } = await connectAccount();
+      setProvider(connectedProvider);
+      setAccount(connectedAccount);
+      await refreshWalletState(connectedProvider, connectedAccount);
+      setStage("idle");
+    } catch (connectError) {
+      setError(describeWalletError(connectError));
+      setStage("error");
+    }
+  }
+
+  async function switchNetwork() {
+    if (!provider) return;
+    setStage("switching");
+    setError("");
+    try {
+      await ensureChain(provider, chain);
+      await refreshWalletState(provider, account);
+      setStage("idle");
+    } catch (switchError) {
+      setError(describeWalletError(switchError));
+      setStage("error");
+    }
+  }
+
+  async function pay() {
+    if (!provider || !account || !payment) return;
+    if (!deployment.token || !deployment.router) {
+      setError("Contract addresses are not configured for this network.");
+      setStage("error");
+      return;
+    }
+
+    setError("");
+    try {
+      const required = Number(payment.amount);
+      const currentAllowance = allowance === null ? 0 : Number(allowance);
+
+      if (currentAllowance < required) {
+        setStage("approving");
+        const hash = await approveToken(provider, deployment.token, deployment.router, payment.amount, 2);
+        setApproveTx(hash);
+        setStage("paying");
+      } else {
+        setStage("paying");
+      }
+      const hash = await payPayment(provider, deployment.router, deployment.token, payment.paymentId);
+      setPayTx(hash);
+      setStage("success");
+      await loadPayment();
+      await refreshWalletState(provider, account);
+    } catch (payError) {
+      setError(describeWalletError(payError));
+      setStage("error");
+    }
+  }
+
+  const wrongNetwork = walletChainId !== null && walletChainId !== NETWORKS[chain].chainId;
+  const isBusy = ["connecting", "switching", "approving", "approving-confirm", "paying", "paying-confirm"].includes(stage);
+  const canPay = payment?.status === "pending" && Boolean(provider) && Boolean(account) && !wrongNetwork && !isBusy;
+
+  const steps: { label: string; state: "todo" | "active" | "done" }[] = [
+    {
+      label: "Connect an EVM wallet",
+      state: account ? "done" : stage === "connecting" ? "active" : "todo"
+    },
+    {
+      label: `Switch to ${NETWORKS[chain].name} (${NETWORKS[chain].chainId})`,
+      state: wrongNetwork ? (stage === "switching" ? "active" : "todo") : walletChainId ? "done" : "todo"
+    },
+    {
+      label: `Approve ${TOKEN_SYMBOL} for the payment router`,
+      state: approveTx ? "done" : stage.startsWith("approving") ? "active" : "todo"
+    },
+    {
+      label: "Submit the payment transaction",
+      state: payTx ? "done" : stage.startsWith("paying") ? "active" : "todo"
+    }
+  ];
+
+  if (loading) {
+    return (
+      <Shell>
+        <div className="center">
+          <Card className="pad-lg" style={{ maxWidth: 560, width: "100%" }}>
+            <p className="muted">Loading payment request…</p>
+          </Card>
+        </div>
+      </Shell>
+    );
+  }
+
+  return (
+    <Shell>
+      <div className="center">
+        <div className="split" style={{ width: "100%", maxWidth: 960 }}>
+          <Card pad-lg>
+            <div className="cluster" style={{ justifyContent: "space-between" }}>
+              <div className="eyebrow">Customer checkout · {NETWORKS[chain].name}</div>
+              <Badge tone={statusMeta.tone}>{statusMeta.label}</Badge>
+            </div>
+
+            <h1 style={{ fontSize: 30, margin: "12px 0 4px" }}>
+              {payment ? `AED ${formatAmount(payment.amount)}` : "Payment request"}
+            </h1>
+            <p className="muted" style={{ marginBottom: 18 }}>
+              Pay with {TOKEN_SYMBOL}, the mock stablecoin used on this testnet. It has no real AED value.
+            </p>
+
+            {loadError ? (
+              <div style={{ marginBottom: 16 }}>
+                <Alert tone="danger" title="Payment unavailable">
+                  {loadError}
+                </Alert>
+              </div>
+            ) : null}
+
+            {payment ? (
+              <KeyValue
+                items={[
+                  {
+                    label: "Payment reference",
+                    value: (
+                      <span className="cluster" style={{ justifyContent: "flex-end" }}>
+                        <span className="mono">{payment.paymentId}</span>
+                        <CopyButton value={payment.paymentId} />
+                      </span>
+                    )
+                  },
+                  { label: "Network", value: NETWORKS[chain].name },
+                  {
+                    label: "Intent expiry",
+                    value: intentExpiresAt
+                      ? `${formatDateTime(intentExpiresAt)} (${formatRelative(intentExpiresAt)})`
+                      : "Connect your wallet to read the expiry from the chain"
+                  }
+                ]}
+              />
+            ) : null}
+
+            {payment?.status === "paid" ? (
+              <div style={{ marginTop: 18 }}>
+                <Alert tone="success" title="Payment settled">
+                  This request has been paid on-chain. No further action is needed.
+                </Alert>
+              </div>
+            ) : payment && payment.status !== "pending" ? (
+              <div style={{ marginTop: 18 }}>
+                <Alert tone="warning" title={`Status: ${statusMeta.label}`}>
+                  This request can no longer be paid. Ask the merchant to create a new request.
+                </Alert>
+              </div>
+            ) : null}
+
+            {payment?.status === "pending" ? (
+              <>
+                <div style={{ margin: "20px 0" }}>
+                  <StepList steps={steps} />
+                </div>
+
+                {account ? (
+                  <div className="stack-sm" style={{ marginBottom: 16 }}>
+                    <div className="cluster">
+                      <span className="wallet-chip">
+                        <span className="badge-dot" aria-hidden="true" style={{ background: wrongNetwork ? "#b3261e" : "#0f7a52" }} />
+                        <span className="mono" title={account}>
+                          {shortenAddress(account)}
+                        </span>
+                      </span>
+                      <CopyButton value={account} />
+                    </div>
+                    <p className="small muted">
+                      Connected wallet network:{" "}
+                      <strong>
+                        {walletChainId === null
+                          ? "unknown"
+                          : walletChainId === NETWORKS[chain].chainId
+                            ? NETWORKS[chain].shortName
+                            : `chain ${walletChainId} (${NETWORKS[chain].shortName} required)`}
+                      </strong>
+                    </p>
+                    {balance !== null ? (
+                      <p className="small muted">
+                        {TOKEN_SYMBOL} balance: <strong>{formatAmount(balance)}</strong>
+                        {allowance !== null ? (
+                          <>
+                            {" · "}
+                            router allowance: <strong>{formatAmount(allowance)}</strong>
+                          </>
+                        ) : null}
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                {stage === "success" ? (
+                  <Alert tone="success" title="Payment confirmed">
+                    The transaction was confirmed on {NETWORKS[chain].shortName}.
+                  </Alert>
+                ) : null}
+
+                {error ? <Alert tone="danger">{error}</Alert> : null}
+
+                <div className="btn-row" style={{ marginTop: 18 }}>
+                  {!account ? (
+                    <button className="btn" type="button" onClick={connect} disabled={isBusy}>
+                      {stage === "connecting" ? "Connecting…" : "Connect wallet"}
+                    </button>
+                  ) : null}
+
+                  {account && wrongNetwork ? (
+                    <button className="btn" type="button" onClick={switchNetwork} disabled={isBusy}>
+                      {stage === "switching" ? "Switching…" : `Switch to ${NETWORKS[chain].shortName}`}
+                    </button>
+                  ) : null}
+
+                  {account && !wrongNetwork ? (
+                    <button className="btn" type="button" onClick={pay} disabled={!canPay}>
+                      {isBusy ? STAGE_LABELS[stage] : `Pay ${formatAmount(payment.amount)} ${TOKEN_SYMBOL}`}
+                    </button>
+                  ) : null}
+                </div>
+
+                {payTx ? (
+                  <p className="small muted" style={{ marginTop: 14 }}>
+                    Payment transaction:{" "}
+                    <a
+                      className="hash"
+                      href={explorerTxUrl(chain, payTx) ?? "#"}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      {payTx.slice(0, 16)}…
+                    </a>
+                  </p>
+                ) : null}
+              </>
+            ) : null}
+          </Card>
+
+          <div className="stack">
+            <Card>
+              <h2 style={{ fontSize: 17, marginBottom: 10 }}>What happens next</h2>
+              <ol className="stack-sm small muted" style={{ paddingLeft: 18, margin: 0 }}>
+                <li>Your wallet approves the gateway to move {TOKEN_SYMBOL} on your behalf.</li>
+                <li>The gateway records the payment and the settlement fee on-chain.</li>
+                <li>The merchant sees the settled status in their dashboard.</li>
+              </ol>
+            </Card>
+
+            <Card>
+              <h2 style={{ fontSize: 17, marginBottom: 10 }}>Network details</h2>
+              <KeyValue
+                items={[
+                  { label: "Network", value: NETWORKS[chain].name },
+                  { label: "Chain ID", value: NETWORKS[chain].chainId },
+                  { label: "Currency", value: NETWORKS[chain].currency },
+                  {
+                    label: "Token",
+                    value: deployment.token ? shortenAddress(deployment.token) : "not configured"
+                  }
+                ]}
+              />
+              <div style={{ marginTop: 14 }}>
+                <Alert tone="warning" title="Test token only">
+                  {TOKEN_SYMBOL} is a mock token issued for this testnet. It is not official DDSC, AE Coin,
+                  or fiat, and cannot be redeemed.
+                </Alert>
+              </div>
+            </Card>
+
+            <p className="small muted">
+              Looking for your own payment history?{" "}
+              <Link className="link" href="/dashboard">
+                Open the merchant dashboard
+              </Link>
+            </p>
+          </div>
+        </div>
+      </div>
+    </Shell>
+  );
+}

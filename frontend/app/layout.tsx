@@ -1,4 +1,21 @@
-import type {Metadata} from "next";
+import type { Metadata } from "next";
 import "./globals.css";
-export const metadata:Metadata={title:"MizanPay — Stablecoin Merchant Gateway",description:"Testnet payment gateway for merchant stablecoin payments."};
-export default function RootLayout({children}:{children:React.ReactNode}){return <html lang="en"><body>{children}</body></html>}
+import { SessionProvider } from "../components/SessionProvider";
+
+export const metadata: Metadata = {
+  title: "MizanPay — Stablecoin Merchant Gateway",
+  description:
+    "Testnet payment gateway for merchants: create payment requests, settle in mock mDDSC on ADI AB Testnet and Polygon Amoy, and reconcile on-chain state.",
+  applicationName: "MizanPay",
+  formatDetection: { telephone: false }
+};
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="en">
+      <body>
+        <SessionProvider>{children}</SessionProvider>
+      </body>
+    </html>
+  );
+}
