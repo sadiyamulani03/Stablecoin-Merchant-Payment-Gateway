@@ -23,8 +23,8 @@ const onboardSchema=z.object({name:z.string().min(2),tradeLicense:z.string().min
 export async function registerRoutes(app:FastifyInstance){
   app.post("/api/merchants/onboard",{preHandler:requireDb},async(req,reply)=>{
     const parsed=onboardSchema.safeParse(req.body); if(!parsed.success)return reply.code(400).send({error:"Invalid onboarding details",details:parsed.error.flatten()});
-    const d=parsed.data; const exists=await prisma.merchant.findUnique({where:{email:d.email}}); if(exists)return reply.code(409).send({error:"Email already registered"});
-    const merchant=await prisma.merchant.create({data:{...d,passwordHash:await bcrypt.hash(d.password,12),status:"testnet_active"}});
+    const {password,...merchantData}=parsed.data; const exists=await prisma.merchant.findUnique({where:{email:merchantData.email}}); if(exists)return reply.code(409).send({error:"Email already registered"});
+    const merchant=await prisma.merchant.create({data:{...merchantData,passwordHash:await bcrypt.hash(password,12),status:"testnet_active"}});
     const token=app.jwt.sign({merchantId:String(merchant.id),email:merchant.email},{expiresIn:"12h"});
     return reply.code(201).send({merchantId:String(merchant.id),walletAddress:merchant.walletAddress,status:merchant.status,token});
   });

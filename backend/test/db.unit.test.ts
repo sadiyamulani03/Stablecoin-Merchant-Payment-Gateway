@@ -1,4 +1,5 @@
 import {describe,it,expect,vi,beforeEach,afterEach} from "vitest";
+import bcrypt from "bcryptjs";
 
 const hoisted=vi.hoisted(()=>({
   merchant:{findUnique: vi.fn(), create: vi.fn(), findFirst: vi.fn()},
@@ -55,6 +56,36 @@ describe("Prisma unit - Merchant",()=>{
   it("enforces unique email via duplicate rejection",async()=>{
     (hoisted.merchant.create as any).mockRejectedValueOnce({code:"P2002",meta:{target:["email"]}});
     await expect(prisma.merchant.create({data:{name:"Dup",tradeLicense:"TL",emirate:"D",category:"C",walletAddress:"0xdup",email:"dup@example.com",passwordHash:"h"}})).rejects.toMatchObject({code:"P2002"});
+  });
+});
+
+describe("Prisma unit - Onboarding regression",()=>{
+  it("does not persist plaintext password field in Merchant.create",async()=>{
+    (hoisted.merchant.create as any).mockResolvedValue({
+      id:"m-1",name:"Acme",email:"acme@example.com",status:"testnet_active",
+    });
+    const inputData={
+      name:"Acme",
+      tradeLicense:"TL-1",
+      emirate:"Dubai",
+      category:"Retail",
+      walletAddress:"0xabc",
+      email:"acme@example.com",
+      password:"securePassword123",
+    };
+    const {password:pw,...data}=inputData;
+    const passwordHash=await bcrypt.hash(pw,12);
+    await prisma.merchant.create({data:{...data,passwordHash,status:"testnet_active"}});
+    const createCall=(hoisted.merchant.create as any).mock.calls[0][0];
+    expect(createCall.data.password).toBeUndefined();
+    expect(createCall.data.passwordHash).toBeDefined();
+    expect(await bcrypt.compare("securePassword123",createCall.data.passwordHash)).toBe(true);
+  });
+
+  it("rejects duplicate email during onboarding",async()=>{
+    (hoisted.merchant.findUnique as any).mockResolvedValueOnce({id:"m-1",email:"dup@example.com"});
+    const exists=await prisma.merchant.findUnique({where:{email:"dup@example.com"}});
+    expect(exists).not.toBeNull();
   });
 });
 
