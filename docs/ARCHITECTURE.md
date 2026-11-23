@@ -25,11 +25,11 @@ The Stablecoin Merchant Payment Gateway is a full-stack application with three l
                               ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                           BACKEND LAYER                                 │
-│  (Fastify, TypeScript, ethers.js v6, MongoDB/Mongoose)                 │
+│  (Fastify, TypeScript, ethers.js v6, MySQL 8 + Prisma ORM)               │
 │                                                                         │
 │  Authentication:  JWT via @fastify/jwt                                  │
 │  Validation:      Zod schemas                                           │
-│  Database:        MongoDB (Merchant, Payment, Subscription, WebhookEvent)│
+│  Database:        MySQL 8 (Prisma) (Merchant, Payment, Subscription, WebhookEvent)│
 │  Blockchain:      ethers.js v6 (JsonRpcProvider, Wallet, Contract)     │
 │  QR Generation:   qrcode library                                        │
 │                                                                         │
@@ -68,7 +68,7 @@ The Stablecoin Merchant Payment Gateway is a full-stack application with three l
 3. Backend validates merchant ownership, calls `createOnchainIntent()`
 4. `createOnchainIntent()` calls `PaymentRouter.createIntent()` on-chain
 5. Contract emits `PaymentCreated` event, returns paymentId and txHash
-6. Backend persists payment record to MongoDB with status "pending"
+6. Backend persists payment record to MySQL with status "pending"
 7. Backend returns QR code payload to frontend
 8. Frontend displays QR code to customer
 
@@ -82,7 +82,7 @@ The Stablecoin Merchant Payment Gateway is a full-stack application with three l
 6. Transaction is mined on-chain
 7. Frontend polls backend `GET /api/payments/[paymentId]`
 8. Backend calls `getOnchainPayment()` to verify status from contract
-9. If on-chain status is Paid, backend updates MongoDB and returns "paid"
+9. If on-chain status is Paid, backend updates MySQL and returns "paid"
 
 ### Refund
 

@@ -10,7 +10,7 @@
 1. Deploy contracts separately to ADI AB Testnet and Polygon Amoy.
 2. Confirm each deploy script reports its expected chain ID and save the three addresses.
 3. Configure backend and frontend address variables independently for both networks.
-4. Start MongoDB, backend, and frontend.
+4. Start MySQL, backend, and frontend.
 5. Register a merchant with a test wallet address.
 6. Create one payment intent on each network.
 7. Open each QR payment page, connect a wallet, switch to the correct network, approve mDDSC, and pay.

@@ -57,7 +57,7 @@
 
 ### Replay Protection
 - Each webhook event has a unique `eventId`
-- Event IDs are persisted in MongoDB with unique index
+- Event IDs are persisted in MySQL with a unique constraint
 - Duplicate event IDs return idempotent response (no state change)
 - Webhook does NOT update payment state; payment state is verified independently via RPC
 
@@ -81,7 +81,7 @@
 - `WEBHOOK_SECRET`: Server-only, long random value
 - `ADI_TESTNET_PRIVATE_KEY`: Server-only, deployer key for ADI
 - `POLYGON_AMOY_PRIVATE_KEY`: Server-only, deployer key for Amoy
-- `MONGODB_URI`: Server-only database connection string
+- `DATABASE_URL`: Server-only database connection string
 - None of these are exposed in frontend bundle or API responses
 
 ### .env Handling

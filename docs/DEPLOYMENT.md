@@ -5,7 +5,7 @@
 - Node.js 22+
 - Foundry (foundryup)
 - A funded testnet deployer wallet for each network
-- MongoDB 7+ (for backend)
+- MySQL 8+ (for backend)
 - Real private keys (never commit these)
 
 ## Step 1: Configure Environment
@@ -24,7 +24,7 @@ POLYGON_AMOY_PRIVATE_KEY=0x<64-hex-characters>
 # Required: Secrets
 JWT_SECRET=at-least-32-random-characters
 WEBHOOK_SECRET=a-long-random-secret
-MONGODB_URI=mongodb://127.0.0.1:27017/stablecoin_gateway
+DATABASE_URL="mysql://USER:PASSWORD@HOST:3306/stablecoin_gateway"
 
 # Optional: RPC URLs (defaults provided)
 ADI_TESTNET_RPC_URL=https://rpc.ab.testnet.adifoundation.ai/
@@ -38,8 +38,8 @@ Security rules for this step:
 - An RPC URL that embeds a provider API key (for example an Alchemy app key in the URL path) **is a
   secret**. Keep it in `.env` only, mark it `sync: false` in `render.yaml`, and rotate it before
   publishing the repository or deploying to a hosted platform.
-- A MongoDB connection string that embeds a username and password is a secret. Use
-  `mongodb://127.0.0.1:27017/stablecoin_gateway` for local work and an Atlas URI with credentials
+- A MySQL connection string that embeds a username and password is a secret. Use
+  `mysql://USER:PASSWORD@HOST:3306/stablecoin_gateway` for local work and a managed MySQL URI with credentials
   supplied only through the environment.
 - Use a separate deployer key per network. A single key used across chains means one compromise
   exposes both deployments and both administrative roles.
@@ -148,8 +148,8 @@ Restart the frontend after updating `.env.local`.
 ## Step 8: Start Services
 
 ```bash
-# MongoDB
-docker compose -f infra/docker-compose.yml up -d mongo
+# MySQL
+docker compose -f infra/docker-compose.yml up -d mysql
 
 # Backend
 npm run dev --workspace backend
@@ -200,7 +200,7 @@ After deployment, verify:
 Target topology for the public testnet demonstration:
 
 ```
-Vercel (Next.js frontend)  ──HTTPS──▶  Render (Fastify API)  ──TLS──▶  MongoDB Atlas
+Vercel (Next.js frontend)  ──HTTPS──▶  Render (Fastify API)  ──TLS──▶  MySQL 8
                                                       └──JSON-RPC──▶ ADI AB Testnet (99999)
                                                                     └──JSON-RPC──▶ Polygon Amoy (80002)
 ```
@@ -240,7 +240,7 @@ Both workspaces also declare `engines.node: >=22` and expose a production `start
 | Auto-Deploy | on for the demo branch |
 
 `render.yaml` in the repository root encodes these settings as a Render Blueprint, except the
-values that must be supplied per account (`MONGODB_URI`, `CORS_ORIGIN`, `FRONTEND_URL`, and the two
+values that must be supplied per account (`DATABASE_URL`, `CORS_ORIGIN`, `FRONTEND_URL`, and the two
 deployer keys).
 
 The backend binds `0.0.0.0` and reads the injected `PORT`; **do not set `PORT` manually** — Render
@@ -273,7 +273,7 @@ variables, in a repository file, or in a screenshot:
 
 | Variable | Requirement |
 |---|---|
-| `MONGODB_URI` | MongoDB Atlas connection string (credentials in the URI). Prefer an Atlas **database user** over the cluster admin account. |
+| `DATABASE_URL` | MySQL connection string (credentials in the URI). Prefer a dedicated MySQL **database user** over the admin account. |
 | `JWT_SECRET` | ≥ 32 characters. Startup **fails fast** in `NODE_ENV=production` if shorter. |
 | `WEBHOOK_SECRET` | Long random secret used for HMAC webhook verification. |
 | `ADI_TESTNET_PRIVATE_KEY` | Testnet deployer key used to submit on-chain intents and refunds. |
@@ -312,29 +312,28 @@ CORS_ORIGIN=https://<project>.vercel.app,https://<project>-<preview>.vercel.app
 - Requests from origins outside the allowlist receive no `access-control-allow-origin` header, so
   the browser blocks them.
 
-### MongoDB Atlas Network Access for Render
+### MySQL Network Access for Render
 
-Atlas rejects connections from IPs that are not on the **IP Access List**, and Render's outbound
-IP must be allowlisted:
+A managed MySQL provider (for example an AWS RDS, Azure Database for MySQL, or a Render private
+database) must accept connections from Render's outbound IP:
 
-1. Atlas → **Network Access** → **Add IP Address**.
+1. Allow Render's outbound IP in your MySQL provider's firewall / network access list.
 2. Preferred: use Render's **Static Outbound IP** (available on paid plans) and add that single
    address. This keeps the allowlist tight and stable across deploys.
-3. Free-tier fallback for a short demo: add `0.0.0.0/0` ("Allow access from anywhere"). This opens
-   the cluster to the public internet and is acceptable only for a disposable test database with
-   strong credentials; replace it with the static egress IP before any public demo.
-4. The database user used in `MONGODB_URI` must be granted read/write on the gateway database and
-   the cluster must not be paused.
+3. Free-tier fallback for a short demo: allow `0.0.0.0/0`. This opens the database to the public
+   internet and is acceptable only for a disposable test database with strong credentials; replace
+   it with the static egress IP before any public demo.
+4. The database user used in `DATABASE_URL` must be granted read/write on the gateway database.
 
 Verify from outside the container before pointing the frontend at it:
 
 ```
-curl https://<api-host>/health     # {"mongodb":"connected"}
+curl https://<api-host>/health     # {"mysql":"connected"}
 ```
 
-If the response shows `"mongodb":"disconnected"`, the backend logs the exact connection error
-(`MongoDB connection failed: …`) — that message identifies an allowlist rejection, an invalid URI,
-or an unreachable cluster.
+If the response shows `"mysql":"disconnected"`, the backend logs the exact connection error
+(`MySQL connection failed: …`) — that message identifies a firewall rejection, an invalid URI,
+or an unreachable instance.
 
 ### Deploy steps (Render)
 
@@ -345,8 +344,8 @@ or an unreachable cluster.
    addresses because the same deployer nonce was used on each chain — they are still separate
    deployments on separate chains).
 4. Deploy. The build log must show `npm ci` and the TypeScript compile, then the service logs
-   `Server listening at http://0.0.0.0:<port>` and `MongoDB connected`.
-5. Confirm `GET https://<api-host>/health` returns HTTP 200 with `"mongodb":"connected"`.
+   `Server listening at http://0.0.0.0:<port>` and `MySQL connected`.
+5. Confirm `GET https://<api-host>/health` returns HTTP 200 with `"mysql":"connected"`.
 
 ## Vercel — Frontend
 
@@ -378,7 +377,7 @@ table is public by definition.
 | `NEXT_PUBLIC_POLYGON_ROUTER_ADDRESS` | deployed Amoy router address |
 | `NEXT_PUBLIC_POLYGON_SUBSCRIPTION_MANAGER_ADDRESS` | deployed Amoy subscription manager |
 
-**Never add** `MONGODB_URI`, `JWT_SECRET`, `WEBHOOK_SECRET`, `ADI_TESTNET_PRIVATE_KEY`, or
+**Never add** `DATABASE_URL`, `JWT_SECRET`, `WEBHOOK_SECRET`, `ADI_TESTNET_PRIVATE_KEY`, or
 `POLYGON_AMOY_PRIVATE_KEY` to Vercel. Any `NEXT_PUBLIC_*` value is readable by every visitor.
 
 Set these variables in **Project Settings → Environment Variables** for **Production**, **Preview**,
@@ -413,13 +412,13 @@ In development only, `http://localhost:4000` is used as the fallback.
 ## Production safety notes
 
 - `/health` is a **liveness** check: it returns HTTP 200 while the HTTP server is up and reports
-  the database state in the `mongodb` field. A transient Atlas outage therefore does not restart
+  the database state in the `mysql` field. A transient MySQL outage therefore does not restart
   the service; database-dependent routes return HTTP 503 `DB_UNAVAILABLE` until the connection
   recovers. Point the Render health check at `/health`.
-- MongoDB initialization runs in the background with 10-second server-selection and connect
+- MySQL initialization runs in the background with 10-second server-selection and connect
   timeouts, so an unreachable database can never block the HTTP listener from starting.
 - `SIGTERM`/`SIGINT` trigger a graceful shutdown: the server stops accepting connections, in-flight
-  requests finish, and the Mongoose connection is closed before exit.
+  requests finish, and the Prisma client is disconnected before exit.
 - Request logs redact `authorization`, `cookie`, and `x-webhook-signature` headers.
 - `NODE_ENV=production` **refuses to start** when `JWT_SECRET` is missing or shorter than 32
   characters. The development fallback secret is rejected explicitly, so a production service can
@@ -431,11 +430,11 @@ In development only, `http://localhost:4000` is used as the fallback.
 
 ## Deployment verification checklist
 
-1. `GET https://<api-host>/health` → HTTP 200, `"mongodb":"connected"`.
+1. `GET https://<api-host>/health` → HTTP 200, `"mysql":"connected"`.
 2. `GET https://<frontend-host>` loads and shows no "not configured" banner.
-3. Register a merchant in the browser; the merchant appears in the Atlas database.
-4. Create a payment; an on-chain intent is submitted and a `Payment` document is written to Atlas.
+3. Register a merchant in the browser; the merchant appears in the MySQL database.
+4. Create a payment; an on-chain intent is submitted and a `Payment` row is written to MySQL.
 5. Customer payment page loads, wallet connects to the correct chain, approval and payment confirm.
-6. `GET https://<api-host>/health` still reports `"mongodb":"connected"` after the flow.
+6. `GET https://<api-host>/health` still reports `"mysql":"connected"` after the flow.
 7. Confirm no secret appears in Render logs, Vercel logs, or the browser bundle.
 

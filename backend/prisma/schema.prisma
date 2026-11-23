@@ -1,0 +1,85 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model Merchant {
+  id                 String   @id @default(uuid()) @db.Char(36)
+  name               String
+  tradeLicense       String
+  emirate            String
+  category           String
+  settlementPreference String @default("stablecoin")
+  walletAddress      String
+  email              String   @unique
+  passwordHash       String
+  status             String   @default("testnet_active")
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  payments           Payment[]
+  subscriptions      Subscription[]
+
+  @@index([email])
+}
+
+model Payment {
+  id             String   @id @default(uuid()) @db.Char(36)
+  paymentId      String
+  chain          String
+  merchantId     String   @db.Char(36)
+  amount         String
+  description    String   @default("")
+  tokenAddress   String
+  status         String   @default("pending")
+  txHash         String?
+  customerAddress String?
+  expiresAt      DateTime
+  settledAt      DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  merchant       Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+
+  @@unique([paymentId, chain])
+  @@index([merchantId])
+  @@index([paymentId])
+  @@index([chain])
+  @@index([status])
+  @@index([merchantId, status])
+}
+
+model Subscription {
+  id              String   @id @default(uuid()) @db.Char(36)
+  subscriptionId  String
+  chain           String
+  merchantId      String   @db.Char(36)
+  customerAddress String
+  amountPerPeriod String
+  periodSeconds   Int
+  nextChargeAt    DateTime
+  status          String   @default("active")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  merchant        Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+
+  @@unique([subscriptionId, chain])
+  @@index([merchantId])
+  @@index([subscriptionId])
+  @@index([chain])
+}
+
+model WebhookEvent {
+  id         String   @id @default(uuid()) @db.Char(36)
+  eventId    String   @unique
+  payloadHash String
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([eventId])
+}

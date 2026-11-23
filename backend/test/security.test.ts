@@ -1,14 +1,12 @@
 import {describe,it,expect,vi,beforeEach,afterEach} from "vitest";
 import Fastify from "fastify";
 import type {FastifyInstance} from "fastify";
-import mongoose from "mongoose";
-import {registerRoutes} from "../src/routes/api.js";
 
 // vi.hoisted so the factory can reference them (vi.mock is hoisted).
 const hoisted=vi.hoisted(()=>({
-  merchantMock:{findOne: vi.fn(), findById: vi.fn(), create: vi.fn()},
-  paymentMock:{findOne: vi.fn(), create: vi.fn(), countDocuments: vi.fn()},
-  subscriptionMock:{find: vi.fn()},
+  merchantMock:{findUnique: vi.fn(), create: vi.fn()},
+  paymentMock:{findUnique: vi.fn(), create: vi.fn(), count: vi.fn(), findMany: vi.fn(), update: vi.fn()},
+  subscriptionMock:{findMany: vi.fn(), create: vi.fn()},
   webhookEventMock:{create: vi.fn()},
   chainMock:{
     createOnchainIntent: vi.fn(),
@@ -18,17 +16,23 @@ const hoisted=vi.hoisted(()=>({
   },
 }));
 
-vi.mock("../src/models/index.js",()=>({
-  Merchant: hoisted.merchantMock,
-  Payment: hoisted.paymentMock,
-  Subscription: hoisted.subscriptionMock,
-  WebhookEvent: hoisted.webhookEventMock,
+vi.mock("../src/lib/prisma.js",()=>({
+  prisma: {
+    merchant: hoisted.merchantMock,
+    payment: hoisted.paymentMock,
+    subscription: hoisted.subscriptionMock,
+    webhookEvent: hoisted.webhookEventMock,
+  },
+  isDbConnected: () => true,
+  connectDb: vi.fn(),
+  disconnectDb: vi.fn(),
 }));
 
 vi.mock("../src/services/chain.js",()=>hoisted.chainMock);
 
-import {Merchant,Payment,Subscription,WebhookEvent} from "../src/models/index.js";
+import {prisma} from "../src/lib/prisma.js";
 import {createOnchainIntent,getOnchainPayment,submitRefund} from "../src/services/chain.js";
+import {registerRoutes} from "../src/routes/api.js";
 import crypto from "node:crypto";
 
 const JWT_SECRET = "test-secret-at-least-32-characters-long!!";
@@ -37,7 +41,6 @@ let appInstance:FastifyInstance|null=null;
 
 function buildApp(){
   const app=Fastify({logger:false});
-  // Mock authenticate decorator (avoids @fastify/jwt which hangs on register in this env).
   app.decorate("authenticate",async(request:any,reply:any)=>{
     const auth=request.headers.authorization||"";
     if(!auth.startsWith("Bearer "))return reply.code(401).send({error:"Unauthorized"});
@@ -54,8 +57,6 @@ function getApp(){
   return appInstance;
 }
 
-// Eagerly initialize the app at module load so the first Fastify request
-// initialization happens before any test runs.
 const app=getApp();
 
 beforeEach(()=>{
@@ -65,16 +66,16 @@ beforeEach(()=>{
   process.env.POLYGON_AMOY_ROUTER_ADDRESS="0xrouterAmoy";
   process.env.POLYGON_AMOY_TOKEN_ADDRESS="0xtokenAmoy";
   vi.clearAllMocks();
-  // Simulate MongoDB connection for route middleware checks
-  (mongoose.connection as any).readyState=1;
-  (Merchant.findOne as any).mockResolvedValue(null);
-  (Merchant.findById as any).mockResolvedValue(null);
-  (Merchant.create as any).mockResolvedValue({_id:"merchant-1",save:vi.fn()});
-  (Payment.findOne as any).mockResolvedValue(null);
-  (Payment.create as any).mockResolvedValue({_id:"payment-1",save:vi.fn()});
-  (Payment.countDocuments as any).mockResolvedValue(0);
-  (Subscription.find as any).mockResolvedValue([]);
-  (WebhookEvent.create as any).mockRejectedValue({code:11000});
+  // Prisma reports connected so DB-dependent routes proceed.
+  (prisma.merchant.findUnique as any).mockResolvedValue(null);
+  (prisma.merchant.create as any).mockResolvedValue({id:"merchant-1"});
+  (prisma.payment.findUnique as any).mockResolvedValue(null);
+  (prisma.payment.create as any).mockResolvedValue({id:"payment-1"});
+  (prisma.payment.count as any).mockResolvedValue(0);
+  (prisma.payment.findMany as any).mockResolvedValue([]);
+  (prisma.payment.update as any).mockResolvedValue({id:"payment-1"});
+  (prisma.subscription.findMany as any).mockResolvedValue([]);
+  (prisma.webhookEvent.create as any).mockRejectedValue({code:"P2002"});
   (createOnchainIntent as any).mockResolvedValue({paymentId:"0xintent",txHash:"0xtx",amountBaseUnits:"10000",decimals:2});
   (getOnchainPayment as any).mockResolvedValue({merchant:"0xmerchant",customer:"0xcustomer",token:"0xtoken",amount:"25.00",createdAt:Math.floor(Date.now()/1000)-200,paidAt:Math.floor(Date.now()/1000),status:1});
   (submitRefund as any).mockResolvedValue({txHash:"0xrefund"});
@@ -109,14 +110,12 @@ describe("backend security regression",()=>{
     });
 
     it("accepts a valid JWT for the owning merchant",async()=>{
-      (Merchant.findById as any).mockResolvedValue({
-        _id:"merchant-1",
+      (prisma.merchant.findUnique as any).mockResolvedValue({
+        id:"merchant-1",
         name:"Acme",
         email:"a@b.c",
-        select:()=>({_id:"merchant-1",name:"Acme",email:"a@b.c"}),
-        toObject:()=>({_id:"merchant-1",name:"Acme",email:"a@b.c"}),
       });
-      (Payment.countDocuments as any).mockResolvedValue(0);
+      (prisma.payment.count as any).mockResolvedValue(0);
       const res=await app.inject({
         method:"GET",url:"/api/merchants/merchant-1",
         headers:{authorization:"Bearer valid-token"},
@@ -127,7 +126,7 @@ describe("backend security regression",()=>{
 
   describe("merchant isolation",()=>{
     it("payment GET does not enforce merchant ownership (data-leak surface)",async()=>{
-      (Payment.findOne as any).mockResolvedValue({paymentId:"pay-1",chain:"adi-testnet",merchantId:"merchant-2",status:"pending",save:vi.fn()});
+      (prisma.payment.findUnique as any).mockResolvedValue({id:"pay-1",paymentId:"pay-1",chain:"adi-testnet",merchantId:"merchant-2",status:"pending"});
       const res=await app.inject({
         method:"GET",url:"/api/payments/pay-1?chain=adi-testnet",
         headers:{authorization:"Bearer valid-token"},
@@ -155,7 +154,7 @@ describe("backend security regression",()=>{
 
   describe("chain validation",()=>{
     it("rejects invalid chain IDs on payment creation",async()=>{
-      (Merchant.findById as any).mockResolvedValue({_id:"merchant-1",walletAddress:"0xabc"});
+      (prisma.merchant.findUnique as any).mockResolvedValue({id:"merchant-1",walletAddress:"0xabc"});
       const res=await app.inject({
         method:"POST",url:"/api/payments/create",
         headers:{authorization:"Bearer valid-token"},
@@ -175,7 +174,7 @@ describe("backend security regression",()=>{
 
   describe("payment creation validation",()=>{
     it("returns 503 when chain contracts are not configured",async()=>{
-      (Merchant.findById as any).mockResolvedValue({_id:"merchant-1",walletAddress:"0xabc"});
+      (prisma.merchant.findUnique as any).mockResolvedValue({id:"merchant-1",walletAddress:"0xabc"});
       (createOnchainIntent as any).mockRejectedValue(new Error("Contracts or signer are not configured for adi-testnet"));
       const res=await app.inject({
         method:"POST",url:"/api/payments/create",
@@ -244,11 +243,11 @@ describe("backend security regression",()=>{
     });
 
     it("handles duplicate webhook event IDs idempotently",async()=>{
-      (WebhookEvent.create as any).mockResolvedValueOnce({eventId:"evt-settled-1"});
+      (prisma.webhookEvent.create as any).mockResolvedValueOnce({eventId:"evt-settled-1"});
       const r1=await app.inject(makeSignedRequest(payload));
       expect(r1.statusCode).toBe(200);
 
-      (WebhookEvent.create as any).mockRejectedValueOnce({code:11000});
+      (prisma.webhookEvent.create as any).mockRejectedValueOnce({code:"P2002"});
       const r2=await app.inject(makeSignedRequest(payload));
       expect(r2.statusCode).toBe(200);
       const body=JSON.parse(r2.body);
@@ -270,7 +269,7 @@ describe("backend security regression",()=>{
 
   describe("on-chain verification requirements",()=>{
     it("webhook alone cannot mark a payment paid - payment status is only updated via independent RPC GET",async()=>{
-      (WebhookEvent.create as any).mockResolvedValue({eventId:"evt-settled-2"});
+      (prisma.webhookEvent.create as any).mockResolvedValue({eventId:"evt-settled-2"});
       const payload={eventId:"evt-settled-2",event:"PaymentSettled",paymentId:"pay-1",chain:"adi-testnet"};
       const raw=JSON.stringify(payload);
       const sig=crypto.createHmac("sha256",JWT_SECRET).update(raw).digest("hex");
@@ -281,14 +280,15 @@ describe("backend security regression",()=>{
       });
       expect(res.statusCode).toBe(200);
       // Webhook must NOT touch the Payment model.
-      expect(Payment.create).not.toHaveBeenCalled();
-      expect(Payment.findOne).not.toHaveBeenCalled();
+      expect(prisma.payment.create).not.toHaveBeenCalled();
+      expect(prisma.payment.findUnique).not.toHaveBeenCalled();
     });
 
     it("payment status reflects on-chain status, not frontend-provided data",async()=>{
-      const saveMock=vi.fn();
-      (Payment.findOne as any).mockResolvedValue({paymentId:"pay-1",chain:"adi-testnet",merchantId:"merchant-1",status:"pending",customerAddress:undefined,settledAt:undefined,save:saveMock});
+      const updateMock=vi.fn();
+      (prisma.payment.findUnique as any).mockResolvedValue({id:"pay-1",paymentId:"pay-1",chain:"adi-testnet",merchantId:"merchant-1",status:"pending",customerAddress:undefined,settledAt:undefined});
       (getOnchainPayment as any).mockResolvedValue({merchant:"0xm",customer:"0xc",token:"0xtok",amount:"25.00",createdAt:Math.floor(Date.now()/1000)-100,paidAt:Math.floor(Date.now()/1000),status:2});
+      (prisma.payment.update as any).mockImplementation(updateMock);
       const res=await app.inject({
         method:"GET",url:"/api/payments/pay-1?chain=adi-testnet",
         headers:{authorization:"Bearer valid-token"},
@@ -296,12 +296,13 @@ describe("backend security regression",()=>{
       expect(res.statusCode).toBe(200);
       const body=JSON.parse(res.body);
       expect(body.status).toBe("paid");
-      expect(saveMock).toHaveBeenCalled();
+      expect(updateMock).toHaveBeenCalled();
     });
 
     it("failed/non-existent on-chain payment is not reported as paid",async()=>{
       (getOnchainPayment as any).mockRejectedValue(new Error("missing"));
-      (Payment.findOne as any).mockResolvedValue({paymentId:"pay-1",chain:"adi-testnet",merchantId:"merchant-1",status:"pending",customerAddress:undefined,settledAt:undefined,save:vi.fn()});
+      (prisma.payment.findUnique as any).mockResolvedValue({id:"pay-1",paymentId:"pay-1",chain:"adi-testnet",merchantId:"merchant-1",status:"pending",customerAddress:undefined,settledAt:undefined});
+      (prisma.payment.update as any).mockResolvedValue({});
       const res=await app.inject({
         method:"GET",url:"/api/payments/pay-1?chain=adi-testnet",
         headers:{authorization:"Bearer valid-token"},

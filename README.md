@@ -15,7 +15,7 @@ Merchants need a simple, secure way to accept stablecoin payments on blockchain 
 A full-stack application with:
 
 - **Smart Contracts** (Solidity 0.8.28, Foundry): MockDDSC token, PaymentRouter, SubscriptionManager with access control, reentrancy protection, and replay protection.
-- **Backend** (Fastify, TypeScript, ethers.js v6, MongoDB): JWT authentication, payment intent management, on-chain transaction verification, webhook HMAC authentication, idempotent processing.
+- **Backend** (Fastify, TypeScript, ethers.js v6, MySQL 8 + Prisma ORM): JWT authentication, payment intent management, on-chain transaction verification, webhook HMAC authentication, idempotent processing.
 - **Frontend** (Next.js 16 App Router, React, Tailwind CSS): Merchant dashboard, payment creation, QR codes, customer checkout with wallet integration.
 
 ## Architecture
@@ -29,9 +29,9 @@ A full-stack application with:
        │                        │                        │
        │                        │                        │
        ▼                        ▼                        ▼
-  LocalStorage           MongoDB              ADI (99999) / Amoy (80002)
-  (JWT token)            (Merchants,         MockDDSC, PaymentRouter,
-                        Payments,            SubscriptionManager
+   LocalStorage           MySQL (Prisma)         ADI (99999) / Amoy (80002)
+   (JWT token)            (Merchants,             MockDDSC, PaymentRouter,
+                        Payments,                SubscriptionManager
                         WebhookEvents)
 ```
 
@@ -45,7 +45,7 @@ A full-stack application with:
 | Backend | Fastify | 5.x |
 | Backend Language | TypeScript | 5.7.x |
 | Backend Ethereum | ethers.js | 6.x |
-| Database | MongoDB / Mongoose | 8.x |
+| Database | MySQL 8 / Prisma ORM | 8.x |
 | Frontend | Next.js App Router | 16.x |
 | Frontend Language | TypeScript | 5.7.x |
 | Frontend Ethereum | ethers.js | 6.x |
@@ -100,7 +100,7 @@ See `docs/API.md` for complete endpoint documentation.
 ### Prerequisites
 - Node.js 22+
 - Foundry (foundryup)
-- MongoDB 7+ (or Docker)
+- MySQL 8+ (or Docker)
 
 ### Installation
 
@@ -159,8 +159,8 @@ npm run build
 ### Local Development
 
 ```bash
-# Terminal 1: MongoDB
-docker compose -f infra/docker-compose.yml up -d mongo
+# Terminal 1: MySQL
+docker compose -f infra/docker-compose.yml up -d mysql
 
 # Terminal 2: Backend
 npm run dev --workspace backend
@@ -175,9 +175,8 @@ Frontend: http://localhost:3000
 ### Hosting Deployment (Render + Vercel)
 
 For the public testnet demonstration, the frontend is hosted on Vercel, the API on Render, and the
-database on MongoDB Atlas. Exact dashboard settings, build/start commands, the full environment
-variable split (public vs. secret), the MongoDB Atlas IP allowlist steps for Render's outbound IP,
-and the deployment verification checklist are documented in
+database on MySQL 8. Exact dashboard settings, build/start commands, the full environment
+variable split (public vs. secret), and the deployment verification checklist are documented in
 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md#hosting-deployment-render--vercel).
 The Render service settings are also encoded as a Blueprint in `render.yaml`.
 
@@ -235,7 +234,7 @@ See `.env.example` for all required variables. Never commit real private keys or
 18 Foundry tests covering payment splitting, double-spend protection, expiry, fee caps, refund authorization, subscription charging/cancellation, and access control.
 
 ### Backend Tests
-Vitest tests covering chain configuration, authentication, merchant isolation, webhook security, and MongoDB schema validation.
+Vitest tests covering chain configuration, authentication, merchant isolation, webhook security, and Prisma schema validation.
 
 ### Frontend Tests
 Vitest tests covering frontend chain configuration.

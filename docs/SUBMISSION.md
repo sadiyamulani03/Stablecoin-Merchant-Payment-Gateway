@@ -37,7 +37,7 @@ A complete full-stack payment gateway with:
 - SubscriptionManager: Pre-funded escrow, customer-managed lifecycle
 
 ### Backend (Fastify + TypeScript + ethers.js v6)
-- JWT authentication, Zod validation, MongoDB persistence
+- JWT authentication, Zod validation, MySQL / Prisma persistence
 - On-chain transaction verification (receipt + events)
 - Webhook HMAC-SHA256 with timing-safe comparison and replay protection
 

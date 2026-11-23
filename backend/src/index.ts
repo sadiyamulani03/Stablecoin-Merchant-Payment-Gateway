@@ -4,13 +4,10 @@ dotenv.config();
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import jwt from "@fastify/jwt";
-import mongoose from "mongoose";
 import {pathToFileURL} from "node:url";
 import {registerAuth} from "./plugins/auth.js";
 import {registerRoutes} from "./routes/api.js";
-
-const MONGO_SERVER_SELECTION_TIMEOUT_MS=10000;
-const MONGO_CONNECT_TIMEOUT_MS=10000;
+import {connectDb,disconnectDb,isDbConnected} from "./lib/prisma.js";
 
 type OriginPolicy={exact:Set<string>;suffixes:string[]};
 
@@ -18,24 +15,22 @@ function buildOriginPolicy(raw:string|undefined):OriginPolicy{
   const exact=new Set<string>();
   const suffixes:string[]=[];
   for(const entry of (raw||"http://localhost:3000").split(",")){
-    const value=entry.trim();
+    const value=entry.trim().replace(/^https?:\/\//i,"").replace(/\/+$/,"");
     if(!value||value==="*")continue;
     if(value.startsWith("*.")){
       suffixes.push(value.slice(1).toLowerCase());
       continue;
     }
-    exact.add(value.replace(/\/+$/,"").toLowerCase());
+    exact.add(value.toLowerCase());
   }
   return {exact,suffixes};
 }
 
 function isOriginAllowed(origin:string,policy:OriginPolicy){
-  const value=origin.replace(/\/+$/,"").toLowerCase();
+  const value=origin.replace(/\/+$/,"").replace(/^https?:\/\//i,"").toLowerCase();
   if(policy.exact.has(value))return true;
   return policy.suffixes.some(suffix=>value.endsWith(suffix)&&value.length>suffix.length);
 }
-
-function isMongoConnected(){return mongoose.connection.readyState===1;}
 
 export async function buildServer(){
   const app=Fastify({
@@ -64,34 +59,28 @@ export async function buildServer(){
   }
   await app.register(jwt,{secret:jwtSecret});
   await registerAuth(app);
-  app.get("/health",async()=>({status:"ok",service:"stablecoin-gateway-api",networks:[{key:"adi-testnet",chainId:99999},{key:"polygon-amoy",chainId:80002}],mongodb:isMongoConnected()?"connected":"disconnected"}));
+  app.get("/health",async()=>({status:"ok",service:"stablecoin-gateway-api",database:"mysql",mysql:isDbConnected()?"connected":"disconnected",networks:[{key:"adi-testnet",chainId:99999},{key:"polygon-amoy",chainId:80002}]}));
   await registerRoutes(app);
-  mongoose.connection.on("connected",()=>app.log.info("MongoDB connected"));
-  mongoose.connection.on("error",(err)=>app.log.error("MongoDB error: %s",err.message));
-  mongoose.connection.on("disconnected",()=>app.log.warn("MongoDB disconnected"));
-  mongoose.connection.on("reconnected",()=>app.log.info("MongoDB reconnected"));
   return app;
 }
 
-async function connectMongo(app:Fastify.FastifyInstance){
-  const uri=process.env.MONGODB_URI;
-  if(!uri){
-    app.log.warn("MONGODB_URI is not configured; database-dependent routes will return 503");
+async function connectDatabase(app:Fastify.FastifyInstance){
+  const url=process.env.DATABASE_URL;
+  if(!url){
+    app.log.warn("DATABASE_URL is not configured; database-dependent routes will return 503");
     return;
   }
   try{
-    await mongoose.connect(uri,{
-      serverSelectionTimeoutMS:MONGO_SERVER_SELECTION_TIMEOUT_MS,
-      connectTimeoutMS:MONGO_CONNECT_TIMEOUT_MS,
-    });
+    await connectDb();
+    if(isDbConnected())app.log.info("MySQL connected");
   }catch(err){
-    app.log.error("MongoDB connection failed: %s",err instanceof Error?err.message:String(err));
+    app.log.error("MySQL connection failed: %s",err instanceof Error?err.message:String(err));
   }
 }
 
 const start=async()=>{
   const app=await buildServer();
-  void connectMongo(app).catch((err)=>app.log.error("MongoDB initialization error: %s",err instanceof Error?err.message:String(err)));
+  void connectDatabase(app).catch((err)=>app.log.error("MySQL initialization error: %s",err instanceof Error?err.message:String(err)));
   const port=Number.parseInt(process.env.PORT||"4000",10);
   if(!Number.isInteger(port)||port<1||port>65535)throw new Error(`Invalid PORT value: ${String(process.env.PORT)}`);
   const host=process.env.HOST||"0.0.0.0";
@@ -99,7 +88,7 @@ const start=async()=>{
   const shutdown=async(signal:string)=>{
     app.log.info("Received %s, shutting down",signal);
     try{await app.close();}catch(err){app.log.error("Error while closing the HTTP server: %s",err instanceof Error?err.message:String(err));}
-    try{await mongoose.disconnect();}catch(err){app.log.error("Error while closing the MongoDB connection: %s",err instanceof Error?err.message:String(err));}
+    try{await disconnectDb();}catch(err){app.log.error("Error while closing the MySQL connection: %s",err instanceof Error?err.message:String(err));}
     process.exit(0);
   };
   process.once("SIGTERM",()=>{void shutdown("SIGTERM");});

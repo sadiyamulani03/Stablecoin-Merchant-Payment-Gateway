@@ -8,7 +8,7 @@ This document provides a step-by-step demonstration script for the Stablecoin Me
 2. Backend and frontend running locally
 3. Contract addresses configured in `.env` and `frontend/.env.local`
 4. Test wallets with testnet gas tokens and mDDSC
-5. MongoDB running
+5. MySQL running
 
 ## Demo 1: Complete Payment Flow (ADI AB Testnet)
 
