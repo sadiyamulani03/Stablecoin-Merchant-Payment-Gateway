@@ -42,6 +42,7 @@ afterEach(()=>{
 
 async function buildApp(): Promise<FastifyInstance>{
   const app=Fastify({logger:false});
+  app.decorate("authenticate",async(_request:any,_reply:any)=>{});
   await registerRoutes(app);
   return app;
 }
