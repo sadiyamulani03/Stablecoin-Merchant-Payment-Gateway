@@ -4,8 +4,9 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams, useSearchParams } from "next/navigation";
 import type { BrowserProvider } from "ethers";
+import type { Eip1193Provider } from "../../../lib/wallet";
 import { formatEther } from "ethers";
-import { usePrivy, useIdentityToken } from "@privy-io/react-auth";
+import { usePrivy, useIdentityToken, useWallets } from "@privy-io/react-auth";
 import Shell from "../../../components/Shell";
 import { Alert, Badge, Card, KeyValue, StepList } from "../../../components/ui";
 import CopyButton from "../../../components/CopyButton";
@@ -31,8 +32,15 @@ import {
   readContractPayment,
   readTokenBalance
 } from "../../../lib/wallet";
-import { wrapEthereumProvider, readPolBalance, estimateGasFee, POLYGON_AMOY_FAUCET_URL, isPrivyConfigured } from "../../../lib/privy";
-import { getWalletSession, saveWalletSession } from "../../../lib/auth";
+import {
+  wrapEthereumProvider,
+  readPolBalance,
+  estimateGasFee,
+  findEmbeddedEthereumWallet,
+  POLYGON_AMOY_FAUCET_URL,
+  isPrivyConfigured
+} from "../../../lib/privy";
+import { saveWalletSession } from "../../../lib/auth";
 
 type Stage =
   | "idle"
@@ -61,8 +69,9 @@ export default function PayPage() {
   const params = useParams<{ paymentId: string }>();
   const searchParams = useSearchParams();
   const chain = getChain(searchParams.get("chain"));
-  const { user, login: privyLogin, getAccessToken } = usePrivy();
+  const { login: privyLogin, getAccessToken } = usePrivy();
   const { identityToken } = useIdentityToken();
+  const { wallets, ready: walletsReady } = useWallets();
 
   const [payment, setPayment] = useState<PaymentStatusResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -82,7 +91,7 @@ export default function PayPage() {
   const [embeddedLoading, setEmbeddedLoading] = useState(false);
   const [embeddedError, setEmbeddedError] = useState("");
   const privyEnabled = isPrivyConfigured();
-  const walletSession = getWalletSession();
+  const embeddedWallet = findEmbeddedEthereumWallet(wallets);
 
   const [stage, setStage] = useState<Stage>("idle");
   const [error, setError] = useState("");
@@ -190,7 +199,7 @@ export default function PayPage() {
   }
 
   useEffect(() => {
-    if (!privyEnabled || !walletSession?.address) return;
+    if (!privyEnabled || !embeddedWallet || !walletsReady) return;
     setEmbeddedLoading(true);
     setEmbeddedError("");
     (async () => {
@@ -219,18 +228,13 @@ export default function PayPage() {
           walletAddress: string;
           email: string | null;
         };
-        if (verified.walletAddress.toLowerCase() !== walletSession.address.toLowerCase()) {
+        if (verified.walletAddress.toLowerCase() !== embeddedWallet.address.toLowerCase()) {
           setEmbeddedError("Stored wallet address does not match verified wallet. Sign in again.");
           setEmbeddedLoading(false);
           return;
         }
-        const ethereum = (window as any).ethereum;
-        if (!ethereum) {
-          setEmbeddedError("No embedded wallet provider available.");
-          setEmbeddedLoading(false);
-          return;
-        }
-        const provider = wrapEthereumProvider(ethereum);
+        const ethereum = await embeddedWallet.getEthereumProvider();
+        const provider = wrapEthereumProvider(ethereum as unknown as Eip1193Provider);
         if (!provider) {
           setEmbeddedError("Could not create wallet provider.");
           setEmbeddedLoading(false);
@@ -245,68 +249,20 @@ export default function PayPage() {
           setEmbeddedBalance(bal);
         }
         setWalletChainId(chainId);
+        saveWalletSession({ address: verified.walletAddress, email: verified.email ?? null, provider: "privy" });
         setEmbeddedLoading(false);
       } catch (err) {
         setEmbeddedError(err instanceof Error ? err.message : "Failed to restore embedded wallet.");
         setEmbeddedLoading(false);
       }
     })();
-  }, [privyEnabled, walletSession, deployment.token, wrapEthereumProvider, readPolBalance, getAccessToken]);
+  }, [privyEnabled, embeddedWallet, walletsReady, deployment.token, wrapEthereumProvider, readPolBalance, getAccessToken, identityToken]);
 
   async function connectEmbedded() {
     setEmbeddedLoading(true);
     setEmbeddedError("");
     try {
       await privyLogin();
-      let ethereum = (window as any).ethereum;
-      let attempts = 0;
-      while (!ethereum && attempts < 60) {
-        await new Promise((resolve) => setTimeout(resolve, 200));
-        ethereum = (window as any).ethereum;
-        attempts += 1;
-      }
-      if (!ethereum) throw new Error("No embedded wallet provider after login.");
-      const provider = wrapEthereumProvider(ethereum);
-      if (!provider) throw new Error("Could not create wallet provider.");
-      const network = await provider.getNetwork();
-      const chainId = Number(network.chainId);
-      const accounts = await provider.send("eth_requestAccounts", []);
-      const account = accounts?.[0];
-      if (!account) throw new Error("Embedded wallet did not return an account.");
-
-      // Verify wallet ownership with backend using Privy access token
-      const accessToken = await getAccessToken();
-      if (!accessToken) throw new Error("Unable to obtain Privy access token.");
-      const API_URL = (process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000").replace(/\/+$/, "");
-      const response = await fetch(`${API_URL}/api/auth/privy/verify`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${accessToken}`
-        },
-        body: JSON.stringify({ idToken: accessToken })
-      });
-      if (!response.ok) {
-        const body = await response.json().catch(() => ({}));
-        throw new Error(body.error || "Privy wallet verification failed.");
-      }
-      const verified = (await response.json()) as {
-        walletAddress: string;
-        userId: string;
-        email: string | null;
-      };
-      if (verified.walletAddress.toLowerCase() !== account.toLowerCase()) {
-        throw new Error("Wallet ownership verification failed. Address mismatch.");
-      }
-      saveWalletSession({ address: verified.walletAddress, email: verified.email ?? null, provider: "privy" });
-      setEmbeddedProvider(provider);
-      setEmbeddedAccount(verified.walletAddress);
-      setWalletChainId(chainId);
-      if (chainId === 80002 && deployment.token) {
-        const bal = await readPolBalance(provider, verified.walletAddress);
-        setEmbeddedBalance(bal);
-      }
-      setEmbeddedLoading(false);
     } catch (err) {
       setEmbeddedError(err instanceof Error ? err.message : "Embedded wallet connection failed.");
       setEmbeddedLoading(false);

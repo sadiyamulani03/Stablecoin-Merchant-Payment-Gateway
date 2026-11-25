@@ -1,43 +1,37 @@
 import type { ReactNode } from "react";
 
-export interface PrivyEmail {
-  address: string;
-  verified: boolean;
-}
-
-export interface PrivyWallet {
-  address: string;
-  chainType: string;
-  type?: string;
-  connectorType?: string;
-  walletClientType?: string;
-}
-
-export interface PrivyUser {
-  id: string;
-  email: PrivyEmail | null;
-  wallet: PrivyWallet | null;
-}
-
-export interface PrivyInterface {
-  ready: boolean;
-  authenticated: boolean;
-  user: PrivyUser | null;
-  login: (options?: { loginMethods?: string[] }) => void;
-  logout: () => Promise<void>;
-  getAccessToken: () => Promise<string | null>;
-}
-
+// Re-export PrivyProviderProps shape for the wrapper component.
 export interface PrivyProviderProps {
   appId: string;
-  loginMethods?: string[];
-  embeddedWallets?: Record<string, unknown>;
-  onReady?: () => void;
-  onError?: (error: Error) => void;
+  clientId?: string;
+  config?: {
+    loginMethods?: Array<
+      | "wallet"
+      | "email"
+      | "sms"
+      | "google"
+      | "twitter"
+      | "discord"
+      | "github"
+      | "linkedin"
+      | "spotify"
+      | "instagram"
+      | "tiktok"
+      | "line"
+      | "apple"
+      | "farcaster"
+      | "telegram"
+      | "passkey"
+    >;
+    embeddedWallets?: {
+      createOnLogin?: "all-users" | "users-without-wallets" | "off";
+      ethereum?: {
+        createOnLogin?: "all-users" | "users-without-wallets" | "off";
+      };
+      solana?: {
+        createOnLogin?: "all-users" | "users-without-wallets" | "off";
+      };
+    };
+  };
   children: ReactNode;
-}
-
-declare module "@privy-io/react-auth" {
-  export function usePrivy(): PrivyInterface;
-  export function PrivyProvider(props: PrivyProviderProps): JSX.Element;
 }

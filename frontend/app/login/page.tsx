@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter, usePathname } from "next/navigation";
 import Shell from "../../components/Shell";
@@ -9,8 +9,9 @@ import { useSession } from "../../components/SessionProvider";
 import { apiFetch, ApiError } from "../../lib/api";
 import type { AuthResponse } from "../../lib/types";
 import { loginSchema, zodFieldErrors, type FieldErrors } from "../../lib/validation";
-import { usePrivy, useIdentityToken } from "@privy-io/react-auth";
+import { usePrivy, useIdentityToken, useWallets } from "@privy-io/react-auth";
 import { isPrivyConfigured } from "../../lib/privy";
+import { findEmbeddedEthereumWallet } from "../../lib/privy";
 import { saveWalletSession } from "../../lib/auth";
 
 function loginErrorMessage(error: unknown): string {
@@ -35,8 +36,9 @@ export default function Login() {
   const router = useRouter();
   const pathname = usePathname();
   const { signIn } = useSession();
-  const { user, login, authenticated, getAccessToken } = usePrivy();
+  const { login, authenticated, getAccessToken } = usePrivy();
   const { identityToken } = useIdentityToken();
+  const { wallets, ready: walletsReady } = useWallets();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [remember, setRemember] = useState(true);
@@ -44,17 +46,26 @@ export default function Login() {
   const [formError, setFormError] = useState("");
   const [busy, setBusy] = useState(false);
   const [googleBusy, setGoogleBusy] = useState(false);
+  const [walletStatus, setWalletStatus] = useState<"idle" | "creating" | "ready" | "error">("idle");
   const privyEnabled = isPrivyConfigured();
+  const embeddedWallet = findEmbeddedEthereumWallet(wallets);
+  const verifyAttempted = useRef(false);
 
   useEffect(() => {
-    if (!authenticated || !user?.wallet?.address || pathname === "/dashboard") return;
-    const walletAddress = user.wallet?.address;
-    if (!walletAddress) return;
+    if (!authenticated || !walletsReady || verifyAttempted.current) return;
+    if (!embeddedWallet) {
+      setWalletStatus("creating");
+      return;
+    }
+    verifyAttempted.current = true;
+    setWalletStatus("ready");
     (async () => {
       try {
+        const walletAddress = embeddedWallet.address;
         const accessToken = await getAccessToken();
         if (!accessToken) {
           setFormError("Unable to obtain Privy access token. Try again.");
+          setWalletStatus("error");
           return;
         }
         const API_URL = (process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000").replace(/\/+$/, "");
@@ -69,11 +80,13 @@ export default function Login() {
         if (!response.ok) {
           const body = await response.json().catch(() => ({}));
           setFormError(body.error || "Privy verification failed.");
+          setWalletStatus("error");
           return;
         }
         const verified = (await response.json()) as VerifyPrivyResponse;
         if (verified.walletAddress.toLowerCase() !== walletAddress.toLowerCase()) {
           setFormError("Wallet ownership verification failed. Please try signing in again.");
+          setWalletStatus("error");
           return;
         }
         saveWalletSession({
@@ -84,19 +97,23 @@ export default function Login() {
         router.push("/dashboard");
       } catch (error) {
         setFormError(error instanceof Error ? error.message : "Privy sign-in failed. Try again.");
+        setWalletStatus("error");
       }
     })();
-  }, [authenticated, user, router, pathname, getAccessToken]);
+  }, [authenticated, walletsReady, embeddedWallet, router, pathname, getAccessToken, identityToken]);
 
   async function handleGoogleLogin() {
     setGoogleBusy(true);
     setFormError("");
+    setWalletStatus("idle");
+    verifyAttempted.current = false;
     try {
       await login();
     } catch (error) {
       setFormError(
         error instanceof Error ? error.message : "Google sign-in failed. Try again."
       );
+      setWalletStatus("error");
     } finally {
       setGoogleBusy(false);
     }
@@ -150,10 +167,21 @@ export default function Login() {
                   className="btn block"
                   type="button"
                   onClick={handleGoogleLogin}
-                  disabled={googleBusy}
+                  disabled={googleBusy || walletStatus === "creating"}
                 >
-                  {googleBusy ? "Signing in with Google…" : "Continue with Google"}
+                  {walletStatus === "creating"
+                    ? "Creating your embedded wallet…"
+                    : googleBusy
+                      ? "Signing in with Google…"
+                      : "Continue with Google"}
                 </button>
+                {walletStatus === "error" ? (
+                  <div style={{ marginTop: 8 }}>
+                    <Alert tone="danger">
+                      {formError || "Could not create or retrieve your embedded wallet. Try again."}
+                    </Alert>
+                  </div>
+                ) : null}
                 <p className="small muted" style={{ marginTop: 8 }}>
                   Creates or retrieves an embedded Polygon Amoy wallet. No password required.
                 </p>

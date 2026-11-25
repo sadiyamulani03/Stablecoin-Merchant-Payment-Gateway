@@ -1,11 +1,36 @@
 import { BrowserProvider, formatEther, type BigNumberish } from "ethers";
 import type { Eip1193Provider } from "./wallet";
+import type { ConnectedWallet } from "@privy-io/react-auth";
 
 export const POLYGON_AMOY_FAUCET_URL =
   "https://faucet.polygon.technology/";
 
 export function isPrivyConfigured(): boolean {
   return (process.env.NEXT_PUBLIC_PRIVY_APP_ID || "").trim().length > 0;
+}
+
+export function findEmbeddedEthereumWallet(
+  wallets: ConnectedWallet[]
+): ConnectedWallet | null {
+  return (
+    wallets.find(
+      (w) =>
+        w.type === "ethereum" &&
+        (w.walletClientType === "privy" || w.walletClientType === "privy-v2") &&
+        w.connectorType === "embedded" &&
+        !w.imported
+    ) ?? null
+  );
+}
+
+export function isEmbeddedEthereumWallet(wallet: ConnectedWallet | null): boolean {
+  if (!wallet) return false;
+  return (
+    wallet.type === "ethereum" &&
+    (wallet.walletClientType === "privy" || wallet.walletClientType === "privy-v2") &&
+    wallet.connectorType === "embedded" &&
+    !wallet.imported
+  );
 }
 
 export function wrapEthereumProvider(

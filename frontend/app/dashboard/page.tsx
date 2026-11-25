@@ -12,18 +12,18 @@ import {
   XAxis,
   YAxis
 } from "recharts";
-import type { BrowserProvider } from "ethers";
+import type { Eip1193Provider } from "../../lib/wallet";
 import Shell from "../../components/Shell";
 import { Alert, Badge, Card, CardHead, EmptyState, KeyValue, Skeleton, SkeletonLines, Stat } from "../../components/ui";
 import CopyButton from "../../components/CopyButton";
 import { useSession } from "../../components/SessionProvider";
-import { usePrivy } from "@privy-io/react-auth";
+import { usePrivy, useWallets } from "@privy-io/react-auth";
 import { apiFetch, ApiError } from "../../lib/api";
 import { NETWORKS, type ChainKey } from "../../lib/config";
 import { explorerAddressUrl, formatAmount, formatRelative, paymentStatusMeta, shortenAddress } from "../../lib/format";
 import { listPayments, type LedgerEntry } from "../../lib/ledger";
-import { isPrivyConfigured, wrapEthereumProvider, readPolBalance, POLYGON_AMOY_FAUCET_URL } from "../../lib/privy";
-import { getWalletSession } from "../../lib/auth";
+import { isPrivyConfigured, wrapEthereumProvider, readPolBalance, findEmbeddedEthereumWallet, POLYGON_AMOY_FAUCET_URL } from "../../lib/privy";
+import { getWalletSession, saveWalletSession } from "../../lib/auth";
 import type { AnalyticsSummary, MerchantSummary, PaymentStatus, PaymentStatusResponse } from "../../lib/types";
 
 type HistoryRow = {
@@ -51,11 +51,14 @@ export default function Dashboard() {
   const router = useRouter();
   const { session, isResolved } = useSession();
   const { user } = usePrivy();
+  const { wallets } = useWallets();
   const [state, setState] = useState<DashboardState>(EMPTY_STATE);
 
   const merchantId = session?.merchantId ?? null;
 
   // Embedded wallet state (Privy / Google sign-in, separate from merchant JWT session)
+  const embeddedWallet = findEmbeddedEthereumWallet(wallets);
+  const persistedWallet = getWalletSession();
   const [wallet, setWallet] = useState<{
     address: string | null;
     balance: string | null;
@@ -63,12 +66,25 @@ export default function Dashboard() {
     loading: boolean;
     error: string | null;
   }>({
-    address: getWalletSession()?.address ?? null,
+    address: embeddedWallet?.address ?? persistedWallet?.address ?? null,
     balance: null,
     chainId: null,
     loading: false,
     error: null,
   });
+
+  // Persist the live Privy embedded wallet to localStorage for the pay page and
+  // subsequent dashboard mounts, so it is not exclusively dependent on the login
+  // flow's saveWalletSession call.
+  useEffect(() => {
+    if (embeddedWallet?.address && embeddedWallet.address !== persistedWallet?.address) {
+      saveWalletSession({
+        address: embeddedWallet.address,
+        email: user?.email?.address ?? null,
+        provider: "privy"
+      });
+    }
+  }, [embeddedWallet, user, persistedWallet]);
 
   const privyEnabled = isPrivyConfigured();
   const walletConnected = Boolean(wallet.address);
@@ -129,7 +145,7 @@ export default function Dashboard() {
   }, [merchantId, isResolved, router]);
 
   useEffect(() => {
-    if (!walletConnected || !wallet.address || wallet.loading) return;
+    if (!embeddedWallet || !wallet.address || wallet.loading) return;
     if (walletChain !== "polygon-amoy") {
       setWallet((prev) => ({ ...prev, chainId: wallet.chainId }));
       return;
@@ -137,14 +153,8 @@ export default function Dashboard() {
     setWallet((prev) => ({ ...prev, loading: true, error: null }));
     (async () => {
       try {
-        const userWallet = user?.wallet;
-        if (!userWallet) return;
-        const ethereum = (window as any).ethereum;
-        if (!ethereum) {
-          setWallet((prev) => ({ ...prev, loading: false, error: "No embedded wallet provider available." }));
-          return;
-        }
-        const provider = wrapEthereumProvider(ethereum);
+        const ethereum = await embeddedWallet.getEthereumProvider();
+        const provider = wrapEthereumProvider(ethereum as unknown as Eip1193Provider);
         if (!provider) {
           setWallet((prev) => ({ ...prev, loading: false, error: "Could not create wallet provider." }));
           return;
@@ -165,7 +175,7 @@ export default function Dashboard() {
         }));
       }
     })();
-  }, [walletConnected, wallet.address, wallet.loading, walletChain, user, wrapEthereumProvider, readPolBalance]);
+  }, [embeddedWallet, wallet.address, wallet.loading, walletChain, wrapEthereumProvider, readPolBalance]);
 
   const chartData = useMemo(() => {
     if (!state.rows.length) return [];

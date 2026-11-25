@@ -21,6 +21,7 @@
     "turbo": "^2.3.3"
   },
   "dependencies": {
-    "@rolldown/binding-linux-x64-gnu": "^1.2.19"
+    "@rolldown/binding-linux-x64-gnu": "^1.2.19",
+    "react-aria": "3.48.0"
   }
 }
