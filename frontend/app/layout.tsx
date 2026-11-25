@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import { SessionProvider } from "../components/SessionProvider";
+import { PrivyProviderWrapper } from "../components/PrivyProviderWrapper";
 
 export const metadata: Metadata = {
   title: "MizanPay — Stablecoin Merchant Gateway",
@@ -14,7 +15,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en">
       <body>
-        <SessionProvider>{children}</SessionProvider>
+        <PrivyProviderWrapper>
+          <SessionProvider>{children}</SessionProvider>
+        </PrivyProviderWrapper>
       </body>
     </html>
   );

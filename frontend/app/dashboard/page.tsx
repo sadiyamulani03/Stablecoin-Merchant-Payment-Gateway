@@ -12,14 +12,18 @@ import {
   XAxis,
   YAxis
 } from "recharts";
+import type { BrowserProvider } from "ethers";
 import Shell from "../../components/Shell";
 import { Alert, Badge, Card, CardHead, EmptyState, KeyValue, Skeleton, SkeletonLines, Stat } from "../../components/ui";
 import CopyButton from "../../components/CopyButton";
 import { useSession } from "../../components/SessionProvider";
+import { usePrivy } from "@privy-io/react-auth";
 import { apiFetch, ApiError } from "../../lib/api";
 import { NETWORKS, type ChainKey } from "../../lib/config";
 import { explorerAddressUrl, formatAmount, formatRelative, paymentStatusMeta, shortenAddress } from "../../lib/format";
 import { listPayments, type LedgerEntry } from "../../lib/ledger";
+import { isPrivyConfigured, wrapEthereumProvider, readPolBalance, POLYGON_AMOY_FAUCET_URL } from "../../lib/privy";
+import { getWalletSession } from "../../lib/auth";
 import type { AnalyticsSummary, MerchantSummary, PaymentStatus, PaymentStatusResponse } from "../../lib/types";
 
 type HistoryRow = {
@@ -46,9 +50,29 @@ const EMPTY_STATE: DashboardState = {
 export default function Dashboard() {
   const router = useRouter();
   const { session, isResolved } = useSession();
+  const { user } = usePrivy();
   const [state, setState] = useState<DashboardState>(EMPTY_STATE);
 
   const merchantId = session?.merchantId ?? null;
+
+  // Embedded wallet state (Privy / Google sign-in, separate from merchant JWT session)
+  const [wallet, setWallet] = useState<{
+    address: string | null;
+    balance: string | null;
+    chainId: number | null;
+    loading: boolean;
+    error: string | null;
+  }>({
+    address: getWalletSession()?.address ?? null,
+    balance: null,
+    chainId: null,
+    loading: false,
+    error: null,
+  });
+
+  const privyEnabled = isPrivyConfigured();
+  const walletConnected = Boolean(wallet.address);
+  const walletChain = wallet.chainId === 80002 ? "polygon-amoy" : null;
 
   useEffect(() => {
     if (!isResolved) return;
@@ -103,6 +127,45 @@ export default function Dashboard() {
     void load();
     return () => controller.abort();
   }, [merchantId, isResolved, router]);
+
+  useEffect(() => {
+    if (!walletConnected || !wallet.address || wallet.loading) return;
+    if (walletChain !== "polygon-amoy") {
+      setWallet((prev) => ({ ...prev, chainId: wallet.chainId }));
+      return;
+    }
+    setWallet((prev) => ({ ...prev, loading: true, error: null }));
+    (async () => {
+      try {
+        const userWallet = user?.wallet;
+        if (!userWallet) return;
+        const ethereum = (window as any).ethereum;
+        if (!ethereum) {
+          setWallet((prev) => ({ ...prev, loading: false, error: "No embedded wallet provider available." }));
+          return;
+        }
+        const provider = wrapEthereumProvider(ethereum);
+        if (!provider) {
+          setWallet((prev) => ({ ...prev, loading: false, error: "Could not create wallet provider." }));
+          return;
+        }
+        const network = await provider.getNetwork();
+        setWallet((prev) => ({ ...prev, chainId: Number(network.chainId), loading: false }));
+        if (Number(network.chainId) === 80002) {
+          const address = wallet.address;
+          if (!address) return;
+          const balance = await readPolBalance(provider, address);
+          setWallet((prev) => ({ ...prev, balance, loading: false }));
+        }
+      } catch (error) {
+        setWallet((prev) => ({
+          ...prev,
+          loading: false,
+          error: error instanceof Error ? error.message : "Could not load wallet balance.",
+        }));
+      }
+    })();
+  }, [walletConnected, wallet.address, wallet.loading, walletChain, user, wrapEthereumProvider, readPolBalance]);
 
   const chartData = useMemo(() => {
     if (!state.rows.length) return [];
@@ -347,6 +410,83 @@ export default function Dashboard() {
               </div>
             ) : null}
           </Card>
+
+          {privyEnabled && (
+            <Card>
+              <div className="cluster" style={{ justifyContent: "space-between", marginBottom: 12 }}>
+                <h2 style={{ fontSize: 17, margin: 0 }}>Embedded Wallet (Polygon Amoy)</h2>
+                {wallet.loading ? <span className="badge pending">Loading…</span> : null}
+              </div>
+              {wallet.error ? (
+                <Alert tone="danger">{wallet.error}</Alert>
+              ) : null}
+              {!wallet.error && (
+                <KeyValue
+                  items={[
+                    {
+                      label: "Wallet address",
+                      value: (
+                        <span className="cluster" style={{ justifyContent: "flex-end" }}>
+                          <span className="mono" title={wallet.address ?? ""}>
+                            {wallet.address ? shortenAddress(wallet.address) : "—"}
+                          </span>
+                          {wallet.address ? (
+                            <CopyButton value={wallet.address} label="Copy" />
+                          ) : null}
+                        </span>
+                      ),
+                    },
+                    {
+                      label: "Network",
+                      value: walletChain ? (
+                        <Badge tone="success">Polygon Amoy (80002)</Badge>
+                      ) : wallet.chainId !== null ? (
+                        <Badge tone="danger">Chain {wallet.chainId} — switch to Polygon Amoy</Badge>
+                      ) : (
+                        <span className="muted small">Not connected</span>
+                      ),
+                    },
+                    {
+                      label: "POL balance",
+                      value: wallet.balance !== null ? (
+                        <span>{formatAmount(wallet.balance)} POL</span>
+                      ) : wallet.loading ? (
+                        <span className="muted small">Loading…</span>
+                      ) : (
+                        <span className="muted small">—</span>
+                      ),
+                    },
+                  ]}
+                />
+              )}
+              <div className="btn-row" style={{ marginTop: 14 }}>
+                <a
+                  href={POLYGON_AMOY_FAUCET_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="btn secondary sm"
+                >
+                  Get Testnet POL (Faucet)
+                </a>
+                {!walletConnected && (
+                  <button
+                    className="btn sm"
+                    type="button"
+                    onClick={() => {
+                      /* handled by login page flow */
+                    }}
+                    disabled
+                  >
+                    Sign in with Google to connect
+                  </button>
+                )}
+              </div>
+              <p className="small muted" style={{ marginTop: 10 }}>
+                This embedded wallet is created when you sign in with Google. It is separate from your
+                merchant account session and is used only for signing payments on Polygon Amoy.
+              </p>
+            </Card>
+          )}
         </div>
       </div>
     </Shell>

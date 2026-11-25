@@ -4,6 +4,8 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams, useSearchParams } from "next/navigation";
 import type { BrowserProvider } from "ethers";
+import { formatEther } from "ethers";
+import { usePrivy, useIdentityToken } from "@privy-io/react-auth";
 import Shell from "../../../components/Shell";
 import { Alert, Badge, Card, KeyValue, StepList } from "../../../components/ui";
 import CopyButton from "../../../components/CopyButton";
@@ -29,6 +31,8 @@ import {
   readContractPayment,
   readTokenBalance
 } from "../../../lib/wallet";
+import { wrapEthereumProvider, readPolBalance, estimateGasFee, POLYGON_AMOY_FAUCET_URL, isPrivyConfigured } from "../../../lib/privy";
+import { getWalletSession, saveWalletSession } from "../../../lib/auth";
 
 type Stage =
   | "idle"
@@ -57,6 +61,8 @@ export default function PayPage() {
   const params = useParams<{ paymentId: string }>();
   const searchParams = useSearchParams();
   const chain = getChain(searchParams.get("chain"));
+  const { user, login: privyLogin, getAccessToken } = usePrivy();
+  const { identityToken } = useIdentityToken();
 
   const [payment, setPayment] = useState<PaymentStatusResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -69,6 +75,15 @@ export default function PayPage() {
   const [allowance, setAllowance] = useState<string | null>(null);
   const [intentExpiresAt, setIntentExpiresAt] = useState<string | null>(null);
 
+  // Embedded wallet (Privy / Google sign-in) state
+  const [embeddedProvider, setEmbeddedProvider] = useState<BrowserProvider | null>(null);
+  const [embeddedAccount, setEmbeddedAccount] = useState("");
+  const [embeddedBalance, setEmbeddedBalance] = useState<string | null>(null);
+  const [embeddedLoading, setEmbeddedLoading] = useState(false);
+  const [embeddedError, setEmbeddedError] = useState("");
+  const privyEnabled = isPrivyConfigured();
+  const walletSession = getWalletSession();
+
   const [stage, setStage] = useState<Stage>("idle");
   const [error, setError] = useState("");
   const [approveTx, setApproveTx] = useState("");
@@ -76,6 +91,9 @@ export default function PayPage() {
 
   const deployment = DEPLOYMENTS[chain];
   const statusMeta = paymentStatusMeta(payment?.status);
+  const usingEmbedded = Boolean(embeddedProvider && embeddedAccount);
+  const activeProvider = usingEmbedded ? embeddedProvider : provider;
+  const activeAccount = usingEmbedded ? embeddedAccount : account;
 
   const loadPayment = useCallback(async () => {
     try {
@@ -171,13 +189,176 @@ export default function PayPage() {
     }
   }
 
+  useEffect(() => {
+    if (!privyEnabled || !walletSession?.address) return;
+    setEmbeddedLoading(true);
+    setEmbeddedError("");
+    (async () => {
+      try {
+        const accessToken = await getAccessToken();
+        if (!accessToken) {
+          setEmbeddedError("No Privy access token available. Sign in with Google first.");
+          setEmbeddedLoading(false);
+          return;
+        }
+        const API_URL = (process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000").replace(/\/+$/, "");
+        const response = await fetch(`${API_URL}/api/auth/privy/verify`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${accessToken}`
+          },
+          body: JSON.stringify({ idToken: accessToken, identityToken })
+        });
+        if (!response.ok) {
+          setEmbeddedError("Privy session expired. Sign in with Google again.");
+          setEmbeddedLoading(false);
+          return;
+        }
+        const verified = (await response.json()) as {
+          walletAddress: string;
+          email: string | null;
+        };
+        if (verified.walletAddress.toLowerCase() !== walletSession.address.toLowerCase()) {
+          setEmbeddedError("Stored wallet address does not match verified wallet. Sign in again.");
+          setEmbeddedLoading(false);
+          return;
+        }
+        const ethereum = (window as any).ethereum;
+        if (!ethereum) {
+          setEmbeddedError("No embedded wallet provider available.");
+          setEmbeddedLoading(false);
+          return;
+        }
+        const provider = wrapEthereumProvider(ethereum);
+        if (!provider) {
+          setEmbeddedError("Could not create wallet provider.");
+          setEmbeddedLoading(false);
+          return;
+        }
+        const network = await provider.getNetwork();
+        const chainId = Number(network.chainId);
+        setEmbeddedProvider(provider);
+        setEmbeddedAccount(verified.walletAddress);
+        if (chainId === 80002 && deployment.token) {
+          const bal = await readPolBalance(provider, verified.walletAddress);
+          setEmbeddedBalance(bal);
+        }
+        setWalletChainId(chainId);
+        setEmbeddedLoading(false);
+      } catch (err) {
+        setEmbeddedError(err instanceof Error ? err.message : "Failed to restore embedded wallet.");
+        setEmbeddedLoading(false);
+      }
+    })();
+  }, [privyEnabled, walletSession, deployment.token, wrapEthereumProvider, readPolBalance, getAccessToken]);
+
+  async function connectEmbedded() {
+    setEmbeddedLoading(true);
+    setEmbeddedError("");
+    try {
+      await privyLogin();
+      let ethereum = (window as any).ethereum;
+      let attempts = 0;
+      while (!ethereum && attempts < 60) {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        ethereum = (window as any).ethereum;
+        attempts += 1;
+      }
+      if (!ethereum) throw new Error("No embedded wallet provider after login.");
+      const provider = wrapEthereumProvider(ethereum);
+      if (!provider) throw new Error("Could not create wallet provider.");
+      const network = await provider.getNetwork();
+      const chainId = Number(network.chainId);
+      const accounts = await provider.send("eth_requestAccounts", []);
+      const account = accounts?.[0];
+      if (!account) throw new Error("Embedded wallet did not return an account.");
+
+      // Verify wallet ownership with backend using Privy access token
+      const accessToken = await getAccessToken();
+      if (!accessToken) throw new Error("Unable to obtain Privy access token.");
+      const API_URL = (process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000").replace(/\/+$/, "");
+      const response = await fetch(`${API_URL}/api/auth/privy/verify`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`
+        },
+        body: JSON.stringify({ idToken: accessToken })
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body.error || "Privy wallet verification failed.");
+      }
+      const verified = (await response.json()) as {
+        walletAddress: string;
+        userId: string;
+        email: string | null;
+      };
+      if (verified.walletAddress.toLowerCase() !== account.toLowerCase()) {
+        throw new Error("Wallet ownership verification failed. Address mismatch.");
+      }
+      saveWalletSession({ address: verified.walletAddress, email: verified.email ?? null, provider: "privy" });
+      setEmbeddedProvider(provider);
+      setEmbeddedAccount(verified.walletAddress);
+      setWalletChainId(chainId);
+      if (chainId === 80002 && deployment.token) {
+        const bal = await readPolBalance(provider, verified.walletAddress);
+        setEmbeddedBalance(bal);
+      }
+      setEmbeddedLoading(false);
+    } catch (err) {
+      setEmbeddedError(err instanceof Error ? err.message : "Embedded wallet connection failed.");
+      setEmbeddedLoading(false);
+    }
+  }
+
+  async function refreshEmbeddedWalletState() {
+    if (!embeddedProvider || !embeddedAccount) return;
+    try {
+      const id = await currentChainId(embeddedProvider);
+      setWalletChainId(id);
+      if (id !== NETWORKS[chain].chainId) return;
+      if (deployment.token) {
+        const tokenBalance = await readTokenBalance(embeddedProvider, deployment.token, embeddedAccount);
+        setBalance(tokenBalance);
+      }
+      if (deployment.router) {
+        const tokenAllowance = await readAllowance(
+          embeddedProvider,
+          deployment.token,
+          embeddedAccount,
+          deployment.router
+        );
+        setAllowance(tokenAllowance);
+      }
+      if (id === 80002) {
+        const bal = await readPolBalance(embeddedProvider, embeddedAccount);
+        setEmbeddedBalance(bal);
+      }
+      try {
+        const onchain = await readContractPayment(embeddedProvider, deployment.router, params.paymentId);
+        setIntentExpiresAt(new Date(Number(onchain.createdAt) * 1000 + 3600 * 1000).toISOString());
+      } catch {
+        setIntentExpiresAt(null);
+      }
+    } catch {
+      /* wallet state refresh failed silently */
+    }
+  }
+
   async function switchNetwork() {
-    if (!provider) return;
+    const netProvider = usingEmbedded ? embeddedProvider : provider;
+    if (!netProvider) return;
     setStage("switching");
     setError("");
     try {
-      await ensureChain(provider, chain);
-      await refreshWalletState(provider, account);
+      await ensureChain(netProvider, chain);
+      if (usingEmbedded) {
+        await refreshEmbeddedWalletState();
+      } else {
+        await refreshWalletState(netProvider, account);
+      }
       setStage("idle");
     } catch (switchError) {
       setError(describeWalletError(switchError));
@@ -186,7 +367,7 @@ export default function PayPage() {
   }
 
   async function pay() {
-    if (!provider || !account || !payment) return;
+    if (!activeProvider || !activeAccount || !payment) return;
     if (!deployment.token || !deployment.router) {
       setError("Contract addresses are not configured for this network.");
       setStage("error");
@@ -198,33 +379,68 @@ export default function PayPage() {
       const required = Number(payment.amount);
       const currentAllowance = allowance === null ? 0 : Number(allowance);
 
+      if (chain === "polygon-amoy") {
+        const polBalance = usingEmbedded ? embeddedBalance : balance;
+        const polBalanceNum = polBalance === null ? 0 : Number(polBalance);
+        if (polBalanceNum === 0) {
+          setError(
+            "Insufficient POL for gas. Your Polygon Amoy wallet has 0 POL. Get testnet POL from the faucet, then retry."
+          );
+          setStage("error");
+          return;
+        }
+        const estimate = await estimateGasFee(
+          activeProvider,
+          deployment.router,
+          "0x",
+          0
+        );
+        const estimateEth = Number(formatEther(estimate));
+        if (polBalanceNum < estimateEth) {
+          setError(
+            `Insufficient POL for gas. Estimated gas cost: ${estimateEth.toFixed(6)} POL, your balance: ${polBalanceNum.toFixed(6)} POL. Get testnet POL from the faucet, then retry.`
+          );
+          setStage("error");
+          return;
+        }
+      }
+
       if (currentAllowance < required) {
         setStage("approving");
-        const hash = await approveToken(provider, deployment.token, deployment.router, payment.amount, 2);
+        const hash = await approveToken(activeProvider, deployment.token, deployment.router, payment.amount, 2);
         setApproveTx(hash);
         setStage("paying");
       } else {
         setStage("paying");
       }
-      const hash = await payPayment(provider, deployment.router, deployment.token, payment.paymentId);
+      const hash = await payPayment(activeProvider, deployment.router, deployment.token, payment.paymentId);
       setPayTx(hash);
       setStage("success");
       await loadPayment();
-      await refreshWalletState(provider, account);
+      if (usingEmbedded) {
+        await refreshEmbeddedWalletState();
+      } else {
+        await refreshWalletState(activeProvider, activeAccount);
+      }
     } catch (payError) {
-      setError(describeWalletError(payError));
+      const msg = describeWalletError(payError);
+      if (/insufficient/i.test(msg)) {
+        setError("Insufficient funds for gas. Get testnet POL from the faucet, then retry.");
+      } else {
+        setError(msg);
+      }
       setStage("error");
     }
   }
 
   const wrongNetwork = walletChainId !== null && walletChainId !== NETWORKS[chain].chainId;
   const isBusy = ["connecting", "switching", "approving", "approving-confirm", "paying", "paying-confirm"].includes(stage);
-  const canPay = payment?.status === "pending" && Boolean(provider) && Boolean(account) && !wrongNetwork && !isBusy;
+  const canPay = payment?.status === "pending" && Boolean(activeProvider) && Boolean(activeAccount) && !wrongNetwork && !isBusy;
 
   const steps: { label: string; state: "todo" | "active" | "done" }[] = [
     {
-      label: "Connect an EVM wallet",
-      state: account ? "done" : stage === "connecting" ? "active" : "todo"
+      label: "Connect an EVM wallet (MetaMask or embedded)",
+      state: activeAccount ? "done" : stage === "connecting" || embeddedLoading ? "active" : "todo"
     },
     {
       label: `Switch to ${NETWORKS[chain].name} (${NETWORKS[chain].chainId})`,
@@ -320,16 +536,19 @@ export default function PayPage() {
                   <StepList steps={steps} />
                 </div>
 
-                {account ? (
+                {activeAccount ? (
                   <div className="stack-sm" style={{ marginBottom: 16 }}>
                     <div className="cluster">
                       <span className="wallet-chip">
                         <span className="badge-dot" aria-hidden="true" style={{ background: wrongNetwork ? "#b3261e" : "#0f7a52" }} />
-                        <span className="mono" title={account}>
-                          {shortenAddress(account)}
+                        <span className="mono" title={activeAccount}>
+                          {shortenAddress(activeAccount)}
                         </span>
+                        {usingEmbedded ? (
+                          <span className="badge-neutral" style={{ fontSize: 11, marginLeft: 6 }}>embedded</span>
+                        ) : null}
                       </span>
-                      <CopyButton value={account} />
+                      <CopyButton value={activeAccount} />
                     </div>
                     <p className="small muted">
                       Connected wallet network:{" "}
@@ -352,6 +571,14 @@ export default function PayPage() {
                         ) : null}
                       </p>
                     ) : null}
+                    {usingEmbedded && chain === "polygon-amoy" && embeddedBalance !== null ? (
+                      <p className="small muted">
+                        POL balance: <strong>{formatAmount(embeddedBalance)}</strong>
+                        {Number(embeddedBalance) === 0 ? (
+                          <span style={{ color: "#b3261e" }}>&nbsp;— no POL for gas</span>
+                        ) : null}
+                      </p>
+                    ) : null}
                   </div>
                 ) : null}
 
@@ -364,22 +591,46 @@ export default function PayPage() {
                 {error ? <Alert tone="danger">{error}</Alert> : null}
 
                 <div className="btn-row" style={{ marginTop: 18 }}>
-                  {!account ? (
-                    <button className="btn" type="button" onClick={connect} disabled={isBusy}>
-                      {stage === "connecting" ? "Connecting…" : "Connect wallet"}
-                    </button>
+                  {!activeAccount ? (
+                    <>
+                      <button className="btn" type="button" onClick={connect} disabled={isBusy}>
+                        {stage === "connecting" ? "Connecting…" : "Connect wallet (MetaMask)"}
+                      </button>
+                      {privyEnabled && !embeddedAccount ? (
+                        <button className="btn secondary" type="button" onClick={connectEmbedded} disabled={embeddedLoading || isBusy}>
+                          {embeddedLoading ? "Signing in with Google…" : "Continue with Google (embedded wallet)"}
+                        </button>
+                      ) : null}
+                      {embeddedError && !embeddedAccount ? (
+                        <div style={{ marginTop: 10 }}>
+                          <Alert tone="danger">{embeddedError}</Alert>
+                        </div>
+                      ) : null}
+                    </>
                   ) : null}
 
-                  {account && wrongNetwork ? (
+                  {activeAccount && wrongNetwork ? (
                     <button className="btn" type="button" onClick={switchNetwork} disabled={isBusy}>
                       {stage === "switching" ? "Switching…" : `Switch to ${NETWORKS[chain].shortName}`}
                     </button>
                   ) : null}
 
-                  {account && !wrongNetwork ? (
+                  {activeAccount && !wrongNetwork ? (
                     <button className="btn" type="button" onClick={pay} disabled={!canPay}>
                       {isBusy ? STAGE_LABELS[stage] : `Pay ${formatAmount(payment.amount)} ${TOKEN_SYMBOL}`}
                     </button>
+                  ) : null}
+
+                  {usingEmbedded && chain === "polygon-amoy" && embeddedBalance !== null && Number(embeddedBalance) === 0 ? (
+                    <div style={{ marginTop: 10 }}>
+                      <Alert tone="warning" title="Insufficient POL for gas">
+                        Your embedded wallet has 0 POL on Polygon Amoy.{" "}
+                        <a href={POLYGON_AMOY_FAUCET_URL} target="_blank" rel="noreferrer" className="link">
+                          Get testnet POL from the faucet
+                        </a>
+                        , then refresh and retry.
+                      </Alert>
+                    </div>
                   ) : null}
                 </div>
 

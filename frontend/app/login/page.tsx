@@ -1,14 +1,17 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, usePathname } from "next/navigation";
 import Shell from "../../components/Shell";
 import { Alert, Field } from "../../components/ui";
 import { useSession } from "../../components/SessionProvider";
 import { apiFetch, ApiError } from "../../lib/api";
 import type { AuthResponse } from "../../lib/types";
 import { loginSchema, zodFieldErrors, type FieldErrors } from "../../lib/validation";
+import { usePrivy, useIdentityToken } from "@privy-io/react-auth";
+import { isPrivyConfigured } from "../../lib/privy";
+import { saveWalletSession } from "../../lib/auth";
 
 function loginErrorMessage(error: unknown): string {
   if (error instanceof ApiError) {
@@ -20,15 +23,84 @@ function loginErrorMessage(error: unknown): string {
   return "Sign in failed. Try again.";
 }
 
+type VerifyPrivyResponse = {
+  userId: string;
+  email: string | null;
+  walletAddress: string;
+  walletChainType: string | null;
+  walletType: string | null;
+};
+
 export default function Login() {
   const router = useRouter();
+  const pathname = usePathname();
   const { signIn } = useSession();
+  const { user, login, authenticated, getAccessToken } = usePrivy();
+  const { identityToken } = useIdentityToken();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [remember, setRemember] = useState(true);
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [formError, setFormError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [googleBusy, setGoogleBusy] = useState(false);
+  const privyEnabled = isPrivyConfigured();
+
+  useEffect(() => {
+    if (!authenticated || !user?.wallet?.address || pathname === "/dashboard") return;
+    const walletAddress = user.wallet?.address;
+    if (!walletAddress) return;
+    (async () => {
+      try {
+        const accessToken = await getAccessToken();
+        if (!accessToken) {
+          setFormError("Unable to obtain Privy access token. Try again.");
+          return;
+        }
+        const API_URL = (process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000").replace(/\/+$/, "");
+        const response = await fetch(`${API_URL}/api/auth/privy/verify`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${accessToken}`
+          },
+          body: JSON.stringify({ idToken: accessToken, identityToken })
+        });
+        if (!response.ok) {
+          const body = await response.json().catch(() => ({}));
+          setFormError(body.error || "Privy verification failed.");
+          return;
+        }
+        const verified = (await response.json()) as VerifyPrivyResponse;
+        if (verified.walletAddress.toLowerCase() !== walletAddress.toLowerCase()) {
+          setFormError("Wallet ownership verification failed. Please try signing in again.");
+          return;
+        }
+        saveWalletSession({
+          address: verified.walletAddress,
+          email: verified.email ?? null,
+          provider: "privy"
+        });
+        router.push("/dashboard");
+      } catch (error) {
+        setFormError(error instanceof Error ? error.message : "Privy sign-in failed. Try again.");
+      }
+    })();
+  }, [authenticated, user, router, pathname, getAccessToken]);
+
+  async function handleGoogleLogin() {
+    setGoogleBusy(true);
+    setFormError("");
+    try {
+      await login();
+    } catch (error) {
+      setFormError(
+        error instanceof Error ? error.message : "Google sign-in failed. Try again."
+      );
+    } finally {
+      setGoogleBusy(false);
+    }
+  }
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -71,6 +143,28 @@ export default function Login() {
             <p className="muted" style={{ marginBottom: 22 }}>
               Sign in to create payment requests and track settlement on both testnets.
             </p>
+
+            {privyEnabled ? (
+              <div style={{ marginBottom: 18 }}>
+                <button
+                  className="btn block"
+                  type="button"
+                  onClick={handleGoogleLogin}
+                  disabled={googleBusy}
+                >
+                  {googleBusy ? "Signing in with Google…" : "Continue with Google"}
+                </button>
+                <p className="small muted" style={{ marginTop: 8 }}>
+                  Creates or retrieves an embedded Polygon Amoy wallet. No password required.
+                </p>
+              </div>
+            ) : null}
+
+            {privyEnabled ? (
+              <div style={{ marginBottom: 10, borderTop: "1px solid var(--line)", paddingTop: 14 }}>
+                <span className="small muted" style={{ opacity: 0.6 }}>&mdash; or &mdash;</span>
+              </div>
+            ) : null}
 
             <form className="form" onSubmit={submit} noValidate>
               <Field label="Email" htmlFor="email" error={fieldErrors.email}>

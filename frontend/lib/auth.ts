@@ -138,3 +138,39 @@ export function authHeaders(): Record<string, string> {
   const token = getToken();
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
+
+export type WalletSession = {
+  address: string;
+  email: string | null;
+  provider: "privy";
+};
+
+const WALLET_ADDRESS_KEY = "gateway_wallet_address";
+const WALLET_EMAIL_KEY = "gateway_wallet_email";
+const WALLET_PROVIDER_KEY = "gateway_wallet_provider";
+
+export function saveWalletSession(session: WalletSession): void {
+  try {
+    window.localStorage.setItem(WALLET_ADDRESS_KEY, session.address);
+    window.localStorage.setItem(WALLET_EMAIL_KEY, session.email ?? "");
+    window.localStorage.setItem(WALLET_PROVIDER_KEY, session.provider);
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+export function getWalletSession(): WalletSession | null {
+  if (typeof window === "undefined") return null;
+  const address = window.localStorage.getItem(WALLET_ADDRESS_KEY);
+  const email = window.localStorage.getItem(WALLET_EMAIL_KEY);
+  const provider = window.localStorage.getItem(WALLET_PROVIDER_KEY);
+  if (!address || provider !== "privy") return null;
+  return { address, email: email || null, provider: "privy" };
+}
+
+export function clearWalletSession(): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(WALLET_ADDRESS_KEY);
+  window.localStorage.removeItem(WALLET_EMAIL_KEY);
+  window.localStorage.removeItem(WALLET_PROVIDER_KEY);
+}
