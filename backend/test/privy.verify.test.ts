@@ -1,8 +1,6 @@
 import {describe,it,expect,vi,beforeEach,afterEach} from "vitest";
 import type {FastifyInstance} from "fastify";
 import Fastify from "fastify";
-import {registerRoutes} from "../src/routes/api.js";
-
 // ---- Mock @privy-io/node ----
 const mocks = vi.hoisted(() => ({
   mockVerifyAccessToken: vi.fn(),
@@ -60,7 +58,15 @@ afterEach(()=>{
   delete process.env.PRIVY_API_URL;
 });
 
-async function buildApp(): Promise<FastifyInstance>{
+async function buildApp(appId: string | null = "test-app-id-12345"): Promise<FastifyInstance>{
+  vi.resetModules();
+  if(appId === null){
+    delete process.env.PRIVY_APP_ID;
+  } else {
+    process.env.PRIVY_APP_ID = appId;
+  }
+  process.env.PRIVY_API_URL = "https://auth.privy.io";
+  const {registerRoutes} = await import("../src/routes/api.js");
   const app=Fastify({logger:false});
   app.decorate("authenticate",async(_request:any,_reply:any)=>{});
   await registerRoutes(app);
@@ -86,8 +92,7 @@ const validIdentityPayload = {
 describe("POST /api/auth/privy/verify - Privy access token verification",()=>{
 
   it("returns 503 when Privy is not configured (no PRIVY_APP_ID)",async()=>{
-    delete process.env.PRIVY_APP_ID;
-    const app=await buildApp();
+    const app=await buildApp(null);
     const res=await app.inject({
       method:"POST",
       url:"/api/auth/privy/verify",
