@@ -23,6 +23,26 @@ vi.mock("jose",()=>({
   createRemoteJWKSet: vi.fn(() => ({}))
 }));
 
+// ---- Mock prisma (isDbConnected used by requireDb preHandler) ----
+const prismaMocks = vi.hoisted(()=>({
+  merchant:{findUnique: vi.fn(), create: vi.fn()},
+  payment:{findUnique: vi.fn(), create: vi.fn(), count: vi.fn(), findMany: vi.fn(), update: vi.fn()},
+  subscription:{findMany: vi.fn(), create: vi.fn()},
+  webhookEvent:{create: vi.fn()},
+}));
+
+vi.mock("../src/lib/prisma.js",()=>({
+  prisma: {
+    merchant: prismaMocks.merchant,
+    payment: prismaMocks.payment,
+    subscription: prismaMocks.subscription,
+    webhookEvent: prismaMocks.webhookEvent,
+  },
+  isDbConnected: () => true,
+  connectDb: vi.fn(),
+  disconnectDb: vi.fn(),
+}));
+
 // ---- Mock fetch (used by createRemoteJWKSet for JWKS fetch) ----
 const mockFetch = vi.fn();
 beforeEach(()=>{
