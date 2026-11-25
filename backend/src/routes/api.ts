@@ -77,7 +77,7 @@ export async function registerRoutes(app:FastifyInstance){
       return reply.code(401).send({error:"Invalid Privy identity token.",code:"INVALID_PRIVY_IDENTITY_TOKEN"});
     }
     const linkedWallets=(identityPayload.linked_accounts ?? []).filter((a:any)=>a.type==="wallet" && a.chain_type==="ethereum");
-    const embeddedWallet=linkedWallets.find((w:any)=>w.wallet_client_type==="privy" && w.connector_type==="embedded") ?? linkedWallets[0] ?? null;
+    const embeddedWallet=linkedWallets.find((w:any)=>w.wallet_client_type==="privy" && w.connector_type==="embedded") ?? null;
     if(!embeddedWallet)return reply.code(401).send({error:"No embedded Ethereum wallet found for user.",code:"NO_EMBEDDED_WALLET"});
     const emailAccount=(identityPayload.linked_accounts ?? []).find((a:any)=>a.type==="email");
     return {
