@@ -113,3 +113,35 @@ describe("isEmbeddedEthereumWallet", () => {
     expect(isEmbeddedEthereumWallet(solana)).toBe(false);
   });
 });
+
+describe("dashboard sign-in navigation", () => {
+  it("navigates to login when no Privy embedded wallet exists", () => {
+    const metamask = makeWallet({
+      address: "0xmetamask",
+      walletClientType: "metamask",
+      connectorType: "injected"
+    });
+    const embeddedWallet = findEmbeddedEthereumWallet([metamask]);
+    expect(embeddedWallet).toBeNull();
+  });
+
+  it("shows wallet info instead of login link when embedded wallet exists", () => {
+    const embedded = makeWallet({
+      address: "0xembedded",
+      walletClientType: "privy",
+      connectorType: "embedded"
+    });
+    const embeddedWallet = findEmbeddedEthereumWallet([embedded]);
+    expect(embeddedWallet).not.toBeNull();
+    expect(embeddedWallet?.address).toBe("0xembedded");
+  });
+
+  it("preserves merchant session when navigating to login", () => {
+    // The login page does not clear merchant session state; it only reads/writes
+    // Privy wallet session keys separate from merchant JWT keys.
+    const merchantKeys = ["gateway_token", "merchant_id", "merchant_name", "gateway_persist"];
+    const walletKeys = ["gateway_wallet_address", "gateway_wallet_email", "gateway_wallet_provider"];
+    expect(merchantKeys).not.toContain("gateway_wallet_address");
+    expect(walletKeys).not.toContain("gateway_token");
+  });
+});

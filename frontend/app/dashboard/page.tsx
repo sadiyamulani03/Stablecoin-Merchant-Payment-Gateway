@@ -479,16 +479,9 @@ export default function Dashboard() {
                   Get Testnet POL (Faucet)
                 </a>
                 {!walletConnected && (
-                  <button
-                    className="btn sm"
-                    type="button"
-                    onClick={() => {
-                      /* handled by login page flow */
-                    }}
-                    disabled
-                  >
+                  <Link href="/login" className="btn sm">
                     Sign in with Google to connect
-                  </button>
+                  </Link>
                 )}
               </div>
               <p className="small muted" style={{ marginTop: 10 }}>
