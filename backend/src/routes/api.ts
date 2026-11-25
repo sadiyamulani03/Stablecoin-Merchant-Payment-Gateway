@@ -3,9 +3,19 @@ import {z} from "zod";
 import bcrypt from "bcryptjs";
 import QRCode from "qrcode";
 import {isAddress} from "ethers";
+import {createRemoteJWKSet} from "jose";
+import {verifyAccessToken, verifyIdentityToken, InvalidAuthTokenError} from "@privy-io/node";
 import {prisma, isDbConnected} from "../lib/prisma.js";
 import {getChain} from "../config/chains.js";
 import {createOnchainIntent,getOnchainPayment,submitRefund} from "../services/chain.js";
+
+const privyAppId = process.env.PRIVY_APP_ID || "";
+const privyApiUrl = (process.env.PRIVY_API_URL || "https://auth.privy.io").replace(/\/$/, "");
+
+const privyJwks = createRemoteJWKSet(
+  new URL(`${privyApiUrl}/v1/apps/${privyAppId}/jwks.json`),
+  { headers: { "privy-app-id": privyAppId } }
+) as unknown as Parameters<typeof verifyAccessToken>[0]["verification_key"];
 
 /**
  * Require MySQL/Prisma to be connected before processing DB-dependent routes.
@@ -32,6 +42,51 @@ export async function registerRoutes(app:FastifyInstance){
     const body=z.object({email:z.string().email(),password:z.string()}).safeParse(req.body);if(!body.success)return reply.code(400).send({error:"Invalid credentials"});
     const merchant=await prisma.merchant.findUnique({where:{email:body.data.email}});if(!merchant||!(await bcrypt.compare(body.data.password,merchant.passwordHash)))return reply.code(401).send({error:"Invalid email or password"});
     return {token:app.jwt.sign({merchantId:String(merchant.id),email:merchant.email},{expiresIn:"12h"}),merchantId:String(merchant.id),name:merchant.name};
+  });
+  app.post("/api/auth/privy/verify",{preHandler:requireDb},async(req,reply)=>{
+    if(!privyAppId)return reply.code(503).send({error:"Privy is not configured on the backend.",code:"PRIVY_NOT_CONFIGURED"});
+    const body=z.object({idToken:z.string().min(1),identityToken:z.string().min(1)}).safeParse(req.body);if(!body.success)return reply.code(400).send({error:"Invalid request body"});
+    let accessPayload;
+    try{
+      const result=await verifyAccessToken({
+        access_token: body.data.idToken,
+        app_id: privyAppId,
+        verification_key: privyJwks,
+      });
+      accessPayload = result;
+    }catch(error){
+      if(error instanceof InvalidAuthTokenError){
+        return reply.code(401).send({error:"Invalid Privy access token.",code:"INVALID_PRIVY_TOKEN"});
+      }
+      return reply.code(401).send({error:"Invalid Privy access token.",code:"INVALID_PRIVY_TOKEN"});
+    }
+    const userId=accessPayload.user_id;
+    if(!userId)return reply.code(401).send({error:"Invalid Privy access token: missing subject.",code:"INVALID_PRIVY_TOKEN"});
+    let identityPayload;
+    try{
+      const user=await verifyIdentityToken({
+        identity_token: body.data.identityToken,
+        app_id: privyAppId,
+        verification_key: privyJwks,
+      });
+      identityPayload = user;
+    }catch(error){
+      if(error instanceof InvalidAuthTokenError){
+        return reply.code(401).send({error:"Invalid Privy identity token.",code:"INVALID_PRIVY_IDENTITY_TOKEN"});
+      }
+      return reply.code(401).send({error:"Invalid Privy identity token.",code:"INVALID_PRIVY_IDENTITY_TOKEN"});
+    }
+    const linkedWallets=(identityPayload.linked_accounts ?? []).filter((a:any)=>a.type==="wallet" && a.chain_type==="ethereum");
+    const embeddedWallet=linkedWallets.find((w:any)=>w.wallet_client_type==="privy" && w.connector_type==="embedded") ?? linkedWallets[0] ?? null;
+    if(!embeddedWallet)return reply.code(401).send({error:"No embedded Ethereum wallet found for user.",code:"NO_EMBEDDED_WALLET"});
+    const emailAccount=(identityPayload.linked_accounts ?? []).find((a:any)=>a.type==="email");
+    return {
+      userId,
+      email:(emailAccount as any)?.address ?? null,
+      walletAddress:(embeddedWallet as any).address,
+      walletChainType:(embeddedWallet as any).chain_type ?? null,
+      walletType:(embeddedWallet as any).type ?? null,
+    };
   });
   app.get("/api/merchants/:id",{preHandler:[app.authenticate,requireDb]},async(req:any,reply)=>{
     if(req.user.merchantId!==req.params.id)return reply.code(403).send({error:"Forbidden"});
