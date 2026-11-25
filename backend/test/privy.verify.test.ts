@@ -4,12 +4,14 @@ import Fastify from "fastify";
 import {registerRoutes} from "../src/routes/api.js";
 
 // ---- Mock @privy-io/node ----
-const mockVerifyAccessToken = vi.fn();
-const mockVerifyIdentityToken = vi.fn();
+const mocks = vi.hoisted(() => ({
+  mockVerifyAccessToken: vi.fn(),
+  mockVerifyIdentityToken: vi.fn(),
+}));
 
 vi.mock("@privy-io/node",()=>({
-  verifyAccessToken: mockVerifyAccessToken,
-  verifyIdentityToken: mockVerifyIdentityToken,
+  verifyAccessToken: mocks.mockVerifyAccessToken,
+  verifyIdentityToken: mocks.mockVerifyIdentityToken,
   InvalidAuthTokenError: class InvalidAuthTokenError extends Error {}
 }));
 
@@ -26,8 +28,8 @@ const mockFetch = vi.fn();
 beforeEach(()=>{
   vi.stubGlobal("fetch", mockFetch);
   mockFetch.mockReset();
-  mockVerifyAccessToken.mockReset();
-  mockVerifyIdentityToken.mockReset();
+  mocks.mockVerifyAccessToken.mockReset();
+  mocks.mockVerifyIdentityToken.mockReset();
   process.env.PRIVY_APP_ID = "test-app-id-12345";
   process.env.PRIVY_API_URL = "https://auth.privy.io";
 });
@@ -86,7 +88,7 @@ describe("POST /api/auth/privy/verify - Privy access token verification",()=>{
   });
 
   it("returns 401 for invalid access token signature",async()=>{
-    mockVerifyAccessToken.mockRejectedValue(new InvalidAuthTokenError("Invalid signature"));
+    mocks.mockVerifyAccessToken.mockRejectedValue(new InvalidAuthTokenError("Invalid signature"));
     const app=await buildApp();
     const res=await app.inject({
       method:"POST",
@@ -98,7 +100,7 @@ describe("POST /api/auth/privy/verify - Privy access token verification",()=>{
   });
 
   it("returns 401 for incorrect issuer",async()=>{
-    mockVerifyAccessToken.mockRejectedValue(new InvalidAuthTokenError("Invalid issuer"));
+    mocks.mockVerifyAccessToken.mockRejectedValue(new InvalidAuthTokenError("Invalid issuer"));
     const app=await buildApp();
     const res=await app.inject({
       method:"POST",
@@ -110,7 +112,7 @@ describe("POST /api/auth/privy/verify - Privy access token verification",()=>{
   });
 
   it("returns 401 for incorrect audience",async()=>{
-    mockVerifyAccessToken.mockRejectedValue(new InvalidAuthTokenError("Invalid audience"));
+    mocks.mockVerifyAccessToken.mockRejectedValue(new InvalidAuthTokenError("Invalid audience"));
     const app=await buildApp();
     const res=await app.inject({
       method:"POST",
@@ -122,7 +124,7 @@ describe("POST /api/auth/privy/verify - Privy access token verification",()=>{
   });
 
   it("returns 401 for expired token",async()=>{
-    mockVerifyAccessToken.mockRejectedValue(new InvalidAuthTokenError("Token expired"));
+    mocks.mockVerifyAccessToken.mockRejectedValue(new InvalidAuthTokenError("Token expired"));
     const app=await buildApp();
     const res=await app.inject({
       method:"POST",
@@ -134,8 +136,8 @@ describe("POST /api/auth/privy/verify - Privy access token verification",()=>{
   });
 
   it("returns 401 for invalid identity token",async()=>{
-    mockVerifyAccessToken.mockResolvedValue({user_id:"user-123"});
-    mockVerifyIdentityToken.mockRejectedValue(new InvalidAuthTokenError("Invalid identity token"));
+    mocks.mockVerifyAccessToken.mockResolvedValue({user_id:"user-123"});
+    mocks.mockVerifyIdentityToken.mockRejectedValue(new InvalidAuthTokenError("Invalid identity token"));
     const app=await buildApp();
     const res=await app.inject({
       method:"POST",
@@ -147,8 +149,8 @@ describe("POST /api/auth/privy/verify - Privy access token verification",()=>{
   });
 
   it("returns 401 when no embedded Ethereum wallet found",async()=>{
-    mockVerifyAccessToken.mockResolvedValue({user_id:"user-123"});
-    mockVerifyIdentityToken.mockResolvedValue({id:"user-123",linked_accounts:[]});
+    mocks.mockVerifyAccessToken.mockResolvedValue({user_id:"user-123"});
+    mocks.mockVerifyIdentityToken.mockResolvedValue({id:"user-123",linked_accounts:[]});
     const app=await buildApp();
     const res=await app.inject({
       method:"POST",
@@ -160,8 +162,8 @@ describe("POST /api/auth/privy/verify - Privy access token verification",()=>{
   });
 
   it("returns 401 when only external wallets exist",async()=>{
-    mockVerifyAccessToken.mockResolvedValue({user_id:"user-123"});
-    mockVerifyIdentityToken.mockResolvedValue({
+    mocks.mockVerifyAccessToken.mockResolvedValue({user_id:"user-123"});
+    mocks.mockVerifyIdentityToken.mockResolvedValue({
       id:"user-123",
       linked_accounts:[
         {type:"wallet",wallet_client_type:"metamask",connector_type:"injected",chain_type:"ethereum",address:"0xabc"}
@@ -178,8 +180,8 @@ describe("POST /api/auth/privy/verify - Privy access token verification",()=>{
   });
 
   it("returns verified wallet for successful verification",async()=>{
-    mockVerifyAccessToken.mockResolvedValue({user_id:"user-123"});
-    mockVerifyIdentityToken.mockResolvedValue(validIdentityPayload);
+    mocks.mockVerifyAccessToken.mockResolvedValue({user_id:"user-123"});
+    mocks.mockVerifyIdentityToken.mockResolvedValue(validIdentityPayload);
     const app=await buildApp();
     const res=await app.inject({
       method:"POST",
@@ -195,8 +197,8 @@ describe("POST /api/auth/privy/verify - Privy access token verification",()=>{
   });
 
   it("selects embedded wallet when multiple wallets exist",async()=>{
-    mockVerifyAccessToken.mockResolvedValue({user_id:"user-123"});
-    mockVerifyIdentityToken.mockResolvedValue({
+    mocks.mockVerifyAccessToken.mockResolvedValue({user_id:"user-123"});
+    mocks.mockVerifyIdentityToken.mockResolvedValue({
       id:"user-123",
       linked_accounts:[
         {type:"wallet",wallet_client_type:"metamask",connector_type:"injected",chain_type:"ethereum",address:"0xexternal"},
@@ -215,15 +217,15 @@ describe("POST /api/auth/privy/verify - Privy access token verification",()=>{
   });
 
   it("calls verifyAccessToken with access token and appId",async()=>{
-    mockVerifyAccessToken.mockResolvedValue({user_id:"user-123"});
-    mockVerifyIdentityToken.mockResolvedValue(validIdentityPayload);
+    mocks.mockVerifyAccessToken.mockResolvedValue({user_id:"user-123"});
+    mocks.mockVerifyIdentityToken.mockResolvedValue(validIdentityPayload);
     const app=await buildApp();
     await app.inject({
       method:"POST",
       url:"/api/auth/privy/verify",
       payload:{idToken: validAccessToken, identityToken: validIdentityToken}
     });
-    expect(mockVerifyAccessToken).toHaveBeenCalledWith({
+    expect(mocks.mockVerifyAccessToken).toHaveBeenCalledWith({
       access_token: validAccessToken,
       app_id: "test-app-id-12345",
       verification_key: expect.anything()
@@ -231,15 +233,15 @@ describe("POST /api/auth/privy/verify - Privy access token verification",()=>{
   });
 
   it("calls verifyIdentityToken with identity token and appId",async()=>{
-    mockVerifyAccessToken.mockResolvedValue({user_id:"user-123"});
-    mockVerifyIdentityToken.mockResolvedValue(validIdentityPayload);
+    mocks.mockVerifyAccessToken.mockResolvedValue({user_id:"user-123"});
+    mocks.mockVerifyIdentityToken.mockResolvedValue(validIdentityPayload);
     const app=await buildApp();
     await app.inject({
       method:"POST",
       url:"/api/auth/privy/verify",
       payload:{idToken: validAccessToken, identityToken: validIdentityToken}
     });
-    expect(mockVerifyIdentityToken).toHaveBeenCalledWith({
+    expect(mocks.mockVerifyIdentityToken).toHaveBeenCalledWith({
       identity_token: validIdentityToken,
       app_id: "test-app-id-12345",
       verification_key: expect.anything()
