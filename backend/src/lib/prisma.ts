@@ -21,8 +21,13 @@ export async function connectDb(): Promise<void> {
       await prisma.$queryRaw`SELECT 1`;
       dbConnected = true;
       return;
-    } catch {
+    } catch (error) {
       dbConnected = false;
+      console.error(
+        "MySQL connection attempt %d failed: %s",
+        attempt,
+        error instanceof Error ? error.message : String(error),
+      );
       if (attempt < 3) {
         await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
       }
