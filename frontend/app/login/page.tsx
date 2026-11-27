@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import Link from "next/link";
 import { useRouter, usePathname } from "next/navigation";
 import Shell from "../../components/Shell";
@@ -9,7 +9,7 @@ import { useSession } from "../../components/SessionProvider";
 import { apiFetch, ApiError } from "../../lib/api";
 import type { AuthResponse } from "../../lib/types";
 import { loginSchema, zodFieldErrors, type FieldErrors } from "../../lib/validation";
-import { usePrivy, useIdentityToken, useWallets } from "@privy-io/react-auth";
+import { usePrivy, useIdentityToken, useWallets, useCreateWallet } from "@privy-io/react-auth";
 import { isPrivyConfigured } from "../../lib/privy";
 import { findEmbeddedEthereumWallet } from "../../lib/privy";
 import { saveWalletSession } from "../../lib/auth";
@@ -39,6 +39,7 @@ export default function Login() {
   const { login, authenticated, getAccessToken } = usePrivy();
   const { identityToken } = useIdentityToken();
   const { wallets, ready: walletsReady } = useWallets();
+  const { createWallet: createEmbeddedWallet } = useCreateWallet();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [remember, setRemember] = useState(true);
@@ -50,63 +51,70 @@ export default function Login() {
   const privyEnabled = isPrivyConfigured();
   const embeddedWallet = findEmbeddedEthereumWallet(wallets);
   const verifyAttempted = useRef(false);
+  const creationAttempted = useRef(false);
 
   useEffect(() => {
-    if (!authenticated || !walletsReady || verifyAttempted.current) return;
-    if (!embeddedWallet) {
-      setWalletStatus("creating");
+    if (!authenticated || !walletsReady) return;
+
+    if (embeddedWallet) {
+      if (verifyAttempted.current) return;
+      verifyAttempted.current = true;
+      setWalletStatus("ready");
+      (async () => {
+        try {
+          const walletAddress = embeddedWallet.address;
+          const accessToken = await getAccessToken();
+          if (!accessToken) {
+            setFormError("Unable to obtain Privy access token. Try again.");
+            setWalletStatus("error");
+            return;
+          }
+          const verified = await apiFetch<VerifyPrivyResponse>("/api/auth/privy/verify", {
+            method: "POST",
+            headers: { Authorization: `Bearer ${accessToken}` },
+            body: JSON.stringify({ idToken: accessToken, identityToken })
+          });
+          if (verified.walletAddress.toLowerCase() !== walletAddress.toLowerCase()) {
+            setFormError("Wallet ownership verification failed. Please try signing in again.");
+            setWalletStatus("error");
+            return;
+          }
+          saveWalletSession({
+            address: verified.walletAddress,
+            email: verified.email ?? null,
+            provider: "privy"
+          });
+          router.push("/dashboard");
+        } catch (error) {
+          setFormError(error instanceof Error ? error.message : "Privy sign-in failed. Try again.");
+          setWalletStatus("error");
+        }
+      })();
       return;
     }
-    verifyAttempted.current = true;
-    setWalletStatus("ready");
-    (async () => {
-      try {
-        const walletAddress = embeddedWallet.address;
-        const accessToken = await getAccessToken();
-        if (!accessToken) {
-          setFormError("Unable to obtain Privy access token. Try again.");
-          setWalletStatus("error");
-          return;
-        }
-        const API_URL = (process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000").replace(/\/+$/, "");
-        const response = await fetch(`${API_URL}/api/auth/privy/verify`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${accessToken}`
-          },
-          body: JSON.stringify({ idToken: accessToken, identityToken })
-        });
-        if (!response.ok) {
-          const body = await response.json().catch(() => ({}));
-          setFormError(body.error || "Privy verification failed.");
-          setWalletStatus("error");
-          return;
-        }
-        const verified = (await response.json()) as VerifyPrivyResponse;
-        if (verified.walletAddress.toLowerCase() !== walletAddress.toLowerCase()) {
-          setFormError("Wallet ownership verification failed. Please try signing in again.");
-          setWalletStatus("error");
-          return;
-        }
-        saveWalletSession({
-          address: verified.walletAddress,
-          email: verified.email ?? null,
-          provider: "privy"
-        });
-        router.push("/dashboard");
-      } catch (error) {
-        setFormError(error instanceof Error ? error.message : "Privy sign-in failed. Try again.");
+
+    if (creationAttempted.current) return;
+
+    creationAttempted.current = true;
+    setWalletStatus("creating");
+
+    createEmbeddedWallet()
+      .then(() => {
+        // Wallet created. The wallets array updates, embeddedWallet changes,
+        // and this effect re-runs to proceed to verification.
+      })
+      .catch((error) => {
         setWalletStatus("error");
-      }
-    })();
-  }, [authenticated, walletsReady, embeddedWallet, router, pathname, getAccessToken, identityToken]);
+        setFormError(error instanceof Error ? error.message : "Failed to create embedded wallet. Please try again.");
+      });
+  }, [authenticated, walletsReady, embeddedWallet, walletStatus, createEmbeddedWallet, router, pathname, getAccessToken, identityToken]);
 
   async function handleGoogleLogin() {
     setGoogleBusy(true);
     setFormError("");
     setWalletStatus("idle");
     verifyAttempted.current = false;
+    creationAttempted.current = false;
     try {
       await login();
     } catch (error) {
@@ -118,6 +126,13 @@ export default function Login() {
       setGoogleBusy(false);
     }
   }
+
+  const retryWalletCreation = useCallback(() => {
+    verifyAttempted.current = false;
+    creationAttempted.current = false;
+    setFormError("");
+    setWalletStatus("idle");
+  }, []);
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -180,6 +195,13 @@ export default function Login() {
                     <Alert tone="danger">
                       {formError || "Could not create or retrieve your embedded wallet. Try again."}
                     </Alert>
+                    <button
+                      className="btn block"
+                      type="button"
+                      onClick={retryWalletCreation}
+                    >
+                      Try again
+                    </button>
                   </div>
                 ) : null}
                 <p className="small muted" style={{ marginTop: 8 }}>

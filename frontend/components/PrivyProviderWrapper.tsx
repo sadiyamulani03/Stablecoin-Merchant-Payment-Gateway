@@ -25,11 +25,11 @@ export function PrivyProviderWrapper({
       appId={PRIVY_APP_ID}
       config={{
         loginMethods: ["google"],
-        embeddedWallets: {
-          ethereum: {
-            createOnLogin: "users-without-wallets"
-          }
+      embeddedWallets: {
+        ethereum: {
+          createOnLogin: "off"
         }
+      }
       }}
     >
       {children}

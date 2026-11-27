@@ -20,6 +20,7 @@ export type ApiRequestOptions = {
   method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   body?: unknown;
   auth?: boolean;
+  headers?: Record<string, string>;
   signal?: AbortSignal;
 };
 
@@ -45,6 +46,7 @@ export async function apiFetch<T>(path: string, options: ApiRequestOptions = {})
     if (!token) throw new ApiError("Your session has expired. Please sign in again.", 401);
     headers.Authorization = `Bearer ${token}`;
   }
+  if (options.headers) Object.assign(headers, options.headers);
 
   let response: Response;
   try {
@@ -52,7 +54,7 @@ export async function apiFetch<T>(path: string, options: ApiRequestOptions = {})
       method: options.method ?? "GET",
       headers,
       signal: options.signal,
-      body: options.body === undefined ? undefined : JSON.stringify(options.body)
+      body: options.body === undefined ? undefined : (typeof options.body === "string" ? options.body : JSON.stringify(options.body))
     });
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") throw error;
