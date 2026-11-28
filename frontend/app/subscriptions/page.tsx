@@ -55,7 +55,7 @@ export default function Subscriptions() {
   const merchantId = session?.merchantId ?? null;
 
   const [tab, setTab] = useState<"create" | "manage" | "records">("create");
-  const [chain, setChain] = useState<ChainKey>("adi-testnet");
+  const [chain, setChain] = useState<ChainKey>("polygon-amoy");
   const [merchant, setMerchant] = useState("");
   const [amount, setAmount] = useState("");
   const [topUp, setTopUp] = useState("");
