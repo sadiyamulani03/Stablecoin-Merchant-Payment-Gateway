@@ -1,10 +1,13 @@
-import { BrowserProvider, Contract, formatUnits, parseUnits } from "ethers";
+import { BrowserProvider, Contract, MaxUint256, formatUnits, parseUnits, type JsonRpcSigner } from "ethers";
 import { NETWORKS, TOKEN_ABI, ROUTER_ABI, SUBSCRIPTION_ABI, type ChainKey } from "./config";
+import { shortenAddress } from "./format";
 
 export type Eip1193Request = { method: string; params?: unknown[] };
 
 export interface Eip1193Provider {
   request(args: Eip1193Request): Promise<unknown>;
+  on?(event: string, listener: (...args: unknown[]) => void): void;
+  removeListener?(event: string, listener: (...args: unknown[]) => void): void;
 }
 
 declare global {
@@ -67,6 +70,35 @@ export async function connectAccount(): Promise<{ provider: BrowserProvider; acc
   return { provider, account };
 }
 
+/// Pins every write to the account the page is showing: bare `getSigner()` returns whoever the wallet
+/// has selected *now*, so a switch between render and click would quietly sign as someone else.
+export async function signerFor(provider: BrowserProvider, expected: string): Promise<JsonRpcSigner> {
+  const accounts = (await provider.send("eth_accounts", [])) as string[];
+  const active = accounts?.[0];
+  if (!active) {
+    throw new WalletError("Your wallet is locked or disconnected. Reconnect it and try again.", 4900);
+  }
+  if (active.toLowerCase() !== expected.toLowerCase()) {
+    throw new WalletError(
+      `Your wallet is on ${shortenAddress(active)} but this page is still on ${shortenAddress(expected)}. Reconnect that account before signing.`
+    );
+  }
+  return provider.getSigner(expected);
+}
+
+/// Injected wallets switch accounts without reloading the page. The listener reports it so the page
+/// can reset instead of showing one account while the wallet signs as another.
+export function onAccountsChanged(handler: (accounts: string[]) => void): () => void {
+  const injected = getInjectedProvider();
+  if (!injected?.on || !injected.removeListener) return () => {};
+  const listener = (...args: unknown[]) => {
+    const accounts = args[0];
+    handler(Array.isArray(accounts) ? accounts.map(String) : []);
+  };
+  injected.on("accountsChanged", listener);
+  return () => injected.removeListener?.("accountsChanged", listener);
+}
+
 export async function currentChainId(provider: BrowserProvider): Promise<number> {
   const network = await provider.getNetwork();
   return Number(network.chainId);
@@ -126,12 +158,27 @@ export async function readAllowance(
 export async function approveToken(
   provider: BrowserProvider,
   tokenAddress: string,
+  account: string,
   spender: string,
   amount: string,
   decimals: number
 ): Promise<string> {
-  const token = new Contract(tokenAddress, TOKEN_ABI, provider);
+  const token = new Contract(tokenAddress, TOKEN_ABI, await signerFor(provider, account));
   const tx = await token.approve(spender, parseUnits(amount, decimals));
+  const receipt = await tx.wait();
+  return receipt?.hash ?? "";
+}
+
+/// One-time router approval: refunds pull the principal back from the merchant wallet, so the
+/// merchant grants the router an unlimited allowance once instead of per-payment.
+export async function approveUnlimited(
+  provider: BrowserProvider,
+  tokenAddress: string,
+  account: string,
+  spender: string
+): Promise<string> {
+  const token = new Contract(tokenAddress, TOKEN_ABI, await signerFor(provider, account));
+  const tx = await token.approve(spender, MaxUint256);
   const receipt = await tx.wait();
   return receipt?.hash ?? "";
 }
@@ -139,10 +186,11 @@ export async function approveToken(
 export async function payPayment(
   provider: BrowserProvider,
   routerAddress: string,
+  account: string,
   tokenAddress: string,
   paymentId: string
 ): Promise<string> {
-  const router = new Contract(routerAddress, ROUTER_ABI, provider);
+  const router = new Contract(routerAddress, ROUTER_ABI, await signerFor(provider, account));
   const tx = await router.pay(paymentId, tokenAddress);
   const receipt = await tx.wait();
   return receipt?.hash ?? "";

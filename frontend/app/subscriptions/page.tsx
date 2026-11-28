@@ -27,7 +27,9 @@ import {
   currentChainId,
   describeWalletError,
   ensureChain,
-  readContractSubscription
+  onAccountsChanged,
+  readContractSubscription,
+  signerFor
 } from "../../lib/wallet";
 import { amountSchema, walletAddressSchema, zodFieldErrors, type FieldErrors } from "../../lib/validation";
 
@@ -55,7 +57,7 @@ export default function Subscriptions() {
   const merchantId = session?.merchantId ?? null;
 
   const [tab, setTab] = useState<"create" | "manage" | "records">("create");
-  const [chain, setChain] = useState<ChainKey>("adi-testnet");
+  const [chain, setChain] = useState<ChainKey>("polygon-amoy");
   const [merchant, setMerchant] = useState("");
   const [amount, setAmount] = useState("");
   const [topUp, setTopUp] = useState("");
@@ -147,6 +149,37 @@ export default function Subscriptions() {
     return { provider: activeProvider, account: activeAccount };
   }
 
+  /// The account this page will sign with is cached in state, so a wallet switch has to clear that
+  /// cache and the loaded subscription (it belongs to the old customer); otherwise every action is
+  /// refused as a mismatch until the page is reloaded.
+  useEffect(() => {
+    if (!provider) return;
+    const released = onAccountsChanged((accounts) => {
+      const next = accounts[0] ?? null;
+      if (!next) {
+        setProvider(null);
+        setAccount("");
+        setWalletChainId(null);
+        setSubscription(null);
+        setSubId("");
+        setCreatedSubId("");
+        setNotice("");
+        setError("Your wallet disconnected. Connect it again to continue.");
+        return;
+      }
+      if (next.toLowerCase() === account.toLowerCase()) return;
+      setAccount(next);
+      setSubscription(null);
+      setSubId("");
+      setCreatedSubId("");
+      setCreateTx("");
+      setActionTx("");
+      setError("");
+      setNotice(`Your wallet switched to ${shortenAddress(next)}. It will sign as that account from now on.`);
+    });
+    return released;
+  }, [provider, account]);
+
   async function createSubscription(event: React.FormEvent) {
     event.preventDefault();
     setFieldErrors({});
@@ -173,18 +206,23 @@ export default function Subscriptions() {
 
     setBusy(true);
     try {
-      const { provider: activeProvider } = await ensureWallet();
+      const { provider: activeProvider, account: activeAccount } = await ensureWallet();
       const decimals = 2;
       const funding = parsedTopUp.data;
 
       await approveToken(
         activeProvider,
         deployment.token,
+        activeAccount,
         deployment.subscriptions,
         funding,
         decimals
       );
-      const manager = new Contract(deployment.subscriptions, SUBSCRIPTION_ABI, activeProvider);
+      const manager = new Contract(
+        deployment.subscriptions,
+        SUBSCRIPTION_ABI,
+        await signerFor(activeProvider, activeAccount)
+      );
       const tx = await manager.createSubscription(
         parsedMerchant.data,
         deployment.token,
@@ -259,8 +297,12 @@ export default function Subscriptions() {
 
     setBusy(true);
     try {
-      const { provider: activeProvider } = await ensureWallet();
-      const manager = new Contract(deployment.subscriptions, SUBSCRIPTION_ABI, activeProvider);
+      const { provider: activeProvider, account: activeAccount } = await ensureWallet();
+      const manager = new Contract(
+        deployment.subscriptions,
+        SUBSCRIPTION_ABI,
+        await signerFor(activeProvider, activeAccount)
+      );
 
       let tx;
       if (action === "topUp") {
@@ -270,7 +312,7 @@ export default function Subscriptions() {
           setBusy(false);
           return;
         }
-        await approveToken(activeProvider, deployment.token, deployment.subscriptions, parsed.data, 2);
+        await approveToken(activeProvider, deployment.token, activeAccount, deployment.subscriptions, parsed.data, 2);
         tx = await manager.topUp(subId.trim(), parseUnits(parsed.data, 2));
       } else {
         tx = await manager[action](subId.trim());

@@ -23,7 +23,7 @@ import { NETWORKS, type ChainKey } from "../../lib/config";
 import { explorerAddressUrl, formatAmount, formatRelative, paymentStatusMeta, shortenAddress } from "../../lib/format";
 import { listPayments, type LedgerEntry } from "../../lib/ledger";
 import { isPrivyConfigured, wrapEthereumProvider, readPolBalance, findEmbeddedEthereumWallet, POLYGON_AMOY_FAUCET_URL } from "../../lib/privy";
-import { getWalletSession, saveWalletSession } from "../../lib/auth";
+import { clearWalletSession, getWalletSession, saveWalletSession } from "../../lib/auth";
 import type { AnalyticsSummary, MerchantSummary, PaymentStatus, PaymentStatusResponse } from "../../lib/types";
 
 type HistoryRow = {
@@ -51,7 +51,7 @@ export default function Dashboard() {
   const router = useRouter();
   const { session, isResolved } = useSession();
   const { user } = usePrivy();
-  const { wallets } = useWallets();
+  const { wallets, ready: walletsReady } = useWallets();
   const [state, setState] = useState<DashboardState>(EMPTY_STATE);
 
   const merchantId = session?.merchantId ?? null;
@@ -72,6 +72,23 @@ export default function Dashboard() {
     loading: false,
     error: null,
   });
+
+  /// A second Google sign-in brings a different embedded wallet, but `address` is seeded once from
+  /// whichever wallet existed at mount. Follow the live Privy wallet instead, and drop the chain and
+  /// balance read against the old one with it. Waiting for `walletsReady` avoids clearing the address
+  /// during Privy's own rehydration, which would flash the card back to "not connected".
+  /// Signing out leaves that address in the stored wallet session, where the next page to read it
+  /// would treat it as the connected wallet; clear it so a sign-out cannot resurrect the account.
+  useEffect(() => {
+    if (!walletsReady) return;
+    const live = embeddedWallet?.address ?? null;
+    if (!live && getWalletSession()) clearWalletSession();
+    setWallet((prev) =>
+      prev.address === live
+        ? prev
+        : { ...prev, address: live, chainId: null, balance: null, loading: false, error: null }
+    );
+  }, [walletsReady, embeddedWallet]);
 
   // Persist the live Privy embedded wallet to localStorage for the pay page and
   // subsequent dashboard mounts, so it is not exclusively dependent on the login
@@ -144,30 +161,33 @@ export default function Dashboard() {
     return () => controller.abort();
   }, [merchantId, isResolved, router]);
 
+  /// The chain id is read *before* anything is decided: it starts as null, so gating this effect on
+  /// `walletChain` meant `getNetwork()` never ran and the card stayed on "Not connected".
   useEffect(() => {
-    if (!embeddedWallet || !wallet.address || wallet.loading) return;
-    if (walletChain !== "polygon-amoy") {
-      setWallet((prev) => ({ ...prev, chainId: wallet.chainId }));
-      return;
-    }
+    if (!embeddedWallet || !wallet.address) return;
+    // Read against the wallet whose provider this is, so a lingering render can never ask the new
+    // account's provider for the old account's balance.
+    const address = embeddedWallet.address;
+    let active = true;
     setWallet((prev) => ({ ...prev, loading: true, error: null }));
     (async () => {
       try {
         const ethereum = await embeddedWallet.getEthereumProvider();
         const provider = wrapEthereumProvider(ethereum as unknown as Eip1193Provider);
+        if (!active) return;
         if (!provider) {
           setWallet((prev) => ({ ...prev, loading: false, error: "Could not create wallet provider." }));
           return;
         }
-        const network = await provider.getNetwork();
-        setWallet((prev) => ({ ...prev, chainId: Number(network.chainId), loading: false }));
-        if (Number(network.chainId) === 80002) {
-          const address = wallet.address;
-          if (!address) return;
-          const balance = await readPolBalance(provider, address);
-          setWallet((prev) => ({ ...prev, balance, loading: false }));
-        }
+        const chainId = Number((await provider.getNetwork()).chainId);
+        if (!active) return;
+        setWallet((prev) => ({ ...prev, chainId, loading: chainId === 80002, balance: null }));
+        if (chainId !== 80002) return;
+        const balance = await readPolBalance(provider, address);
+        if (!active) return;
+        setWallet((prev) => ({ ...prev, balance, loading: false }));
       } catch (error) {
+        if (!active) return;
         setWallet((prev) => ({
           ...prev,
           loading: false,
@@ -175,7 +195,10 @@ export default function Dashboard() {
         }));
       }
     })();
-  }, [embeddedWallet, wallet.address, wallet.loading, walletChain, wrapEthereumProvider, readPolBalance]);
+    return () => {
+      active = false;
+    };
+  }, [embeddedWallet, wallet.address]);
 
   const chartData = useMemo(() => {
     if (!state.rows.length) return [];

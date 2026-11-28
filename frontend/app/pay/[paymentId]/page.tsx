@@ -27,6 +27,7 @@ import {
   currentChainId,
   describeWalletError,
   ensureChain,
+  onAccountsChanged,
   payPayment,
   readAllowance,
   readContractPayment,
@@ -182,6 +183,35 @@ export default function PayPage() {
       setIntentExpiresAt(null);
     }
   }, [chain, deployment.router, deployment.token, params.paymentId]);
+
+  /// The wallet can switch accounts without a reload. This page signs with the account it cached, so
+  /// a switch has to clear it and go back to the connect step; otherwise approve and pay would both be
+  /// refused as a mismatch until the page is reloaded.
+  useEffect(() => {
+    if (!provider || usingEmbedded) return;
+    const released = onAccountsChanged((accounts) => {
+      const next = accounts[0] ?? null;
+      if (!next) {
+        setProvider(null);
+        setAccount("");
+        setBalance(null);
+        setAllowance(null);
+        setStage("idle");
+        setError("Your wallet disconnected. Connect it again to pay.");
+        return;
+      }
+      if (next.toLowerCase() === account.toLowerCase()) return;
+      setAccount(next);
+      setApproveTx("");
+      setPayTx("");
+      setStage("idle");
+      setError("");
+      refreshWalletState(provider, next).catch(() => {
+        /* the new account's balance and allowance are also read on the next connect */
+      });
+    });
+    return released;
+  }, [provider, account, usingEmbedded, refreshWalletState]);
 
   async function connect() {
     setStage("connecting");
@@ -363,13 +393,26 @@ export default function PayPage() {
 
       if (currentAllowance < required) {
         setStage("approving");
-        const hash = await approveToken(activeProvider, deployment.token, deployment.router, payment.amount, 2);
+        const hash = await approveToken(
+          activeProvider,
+          deployment.token,
+          activeAccount,
+          deployment.router,
+          payment.amount,
+          2
+        );
         setApproveTx(hash);
         setStage("paying");
       } else {
         setStage("paying");
       }
-      const hash = await payPayment(activeProvider, deployment.router, deployment.token, payment.paymentId);
+      const hash = await payPayment(
+        activeProvider,
+        deployment.router,
+        activeAccount,
+        deployment.token,
+        payment.paymentId
+      );
       setPayTx(hash);
       setStage("success");
       await loadPayment();
